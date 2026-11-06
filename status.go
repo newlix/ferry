@@ -55,8 +55,42 @@ func renderKeyStatus(out io.Writer, name string, u keyUsage, err error) {
 		fmt.Fprintf(out, "  %-14s unreachable: %v\n", name, err)
 		return
 	}
-	fmt.Fprintf(out, "  %-14s %-18s %s %3.0f%% left this week, resets in %s · session %3.0f%%, resets in %s\n",
-		name, planLabel(u), bar(u.weeklyRem), u.weeklyRem*100, relTime(time.Until(u.weeklyReset)), u.sessionRem*100, relTime(time.Until(u.sessionReset)))
+
+	line := fmt.Sprintf("  %-14s %-8s %s ", name, planLabel(u), bar(u.weeklyRem))
+	switch {
+	case u.weeklyRem <= 0:
+		line += "out this week"
+		if !u.weeklyReset.IsZero() {
+			line += " — resets in " + relTime(time.Until(u.weeklyReset))
+		}
+	default:
+		line += fmt.Sprintf("%3.0f%% this week", u.weeklyRem*100)
+		if !u.weeklyReset.IsZero() {
+			line += " · resets in " + relTime(time.Until(u.weeklyReset))
+		}
+	}
+	// The 5-hour pool refills by itself; it only deserves a line when it is
+	// about to interrupt work.
+	if u.sessionRem < sessionLowThreshold {
+		state := "low"
+		if u.sessionRem <= 0 {
+			state = "empty"
+		}
+		line += " · 5-hour pool " + state
+		if !u.sessionReset.IsZero() {
+			line += ", refills in " + relTime(time.Until(u.sessionReset))
+		}
+	}
+	fmt.Fprintln(out, line)
+}
+
+const sessionLowThreshold = 0.25
+
+func planLabel(u keyUsage) string {
+	if u.planName == "" {
+		return "unknown"
+	}
+	return strings.TrimPrefix(u.planName, "GLM Coding ")
 }
 
 // relTime renders a countdown compactly: "2h 5m", "1d 8h". Negative or zero
@@ -79,13 +113,6 @@ func relTime(d time.Duration) string {
 	}
 }
 
-func planLabel(u keyUsage) string {
-	if u.planName == "" {
-		return "unknown plan"
-	}
-	return u.planName
-}
-
 func bar(frac float64) string {
 	const width = 10
 	if frac < 0 {
@@ -95,7 +122,7 @@ func bar(frac float64) string {
 		frac = 1
 	}
 	filled := int(math.Round(frac * width))
-	return "[" + strings.Repeat("=", filled) + strings.Repeat("·", width-filled) + "]"
+	return strings.Repeat("▓", filled) + strings.Repeat("░", width-filled)
 }
 
 func healthCheck(listen string) bool {
