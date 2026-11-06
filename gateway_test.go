@@ -77,7 +77,7 @@ func newTestGateway(t *testing.T, mutate func(*Config)) (*httptest.Server, *Gate
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	gw := NewGateway(cfg)
+	gw := NewGateway(cfg, NewNullLogger())
 	srv := httptest.NewServer(gw)
 	t.Cleanup(srv.Close)
 	return srv, gw
@@ -292,29 +292,21 @@ func TestProxyStreamsIncrementally(t *testing.T) {
 	close(release)
 }
 
-func TestGatewayListenKey(t *testing.T) {
+func TestGatewayNeedsNoClientAuth(t *testing.T) {
+	// localhost is the boundary: no gateway key, any Authorization header is
+	// simply replaced with the upstream key.
 	upstream, requests := runUpstream(t, http.StatusOK, `{}`)
 	srv, _ := newTestGateway(t, func(c *Config) {
-		c.ListenKey = "sekret"
 		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
 	})
 
-	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
+	resp := postJSON(t, srv.URL+"/v1/chat/completions", map[string]string{"Authorization": "Bearer whatever"}, `{"model":"glm-5.3"}`)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status without key = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-
-	for _, headers := range []map[string]string{
-		{"Authorization": "Bearer sekret"},
-		{"X-Api-Key": "sekret"},
-	} {
-		resp := postJSON(t, srv.URL+"/v1/chat/completions", headers, `{"model":"glm-5.3"}`)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("status with headers %v = %d, want 200", headers, resp.StatusCode)
-		}
-		expectRequest(t, requests)
+	if up := expectRequest(t, requests); up.auth != "Bearer k1" {
+		t.Errorf("upstream Authorization = %q, want Bearer k1", up.auth)
 	}
 }
 

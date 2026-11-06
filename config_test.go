@@ -4,37 +4,47 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
-func TestLoadConfigOverlayAndEnv(t *testing.T) {
+func TestLoadConfigMissingFileGivesDefaults(t *testing.T) {
+	cfg, err := LoadConfig(filepath.Join(t.TempDir(), "missing.json"), false)
+	if err != nil {
+		t.Fatalf("LoadConfig optional missing file: %v", err)
+	}
+	if cfg.Listen != defaultListen {
+		t.Errorf("Listen = %q, want default %q", cfg.Listen, defaultListen)
+	}
+	if cfg.Upstreams.Usage != defaultUpstreamUsage {
+		t.Errorf("Upstreams.Usage = %q, want default %q", cfg.Upstreams.Usage, defaultUpstreamUsage)
+	}
+	if cfg.Models["glm-5.3"] != "glm-5.3" {
+		t.Errorf("Models = %v, want defaults", cfg.Models)
+	}
+}
+
+func TestLoadConfigExplicitPathMustExist(t *testing.T) {
+	if _, err := LoadConfig(filepath.Join(t.TempDir(), "missing.json"), true); err == nil {
+		t.Fatal("LoadConfig required missing file, want error")
+	}
+}
+
+func TestLoadConfigOverridesAndMergesModels(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	err := os.WriteFile(path, []byte(`{
 		"listen": "127.0.0.1:9999",
-		"listenKey": "sekret",
-		"apiKeys": ["k1", "k2"],
 		"models": {"fast": "glm-5.3-flash"}
 	}`), 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(envAPIKeys, "") // absent
-
-	cfg, err := LoadConfig(path)
+	cfg, err := LoadConfig(path, false)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 	if cfg.Listen != "127.0.0.1:9999" {
 		t.Errorf("Listen = %q, want 127.0.0.1:9999", cfg.Listen)
-	}
-	if cfg.ListenKey != "sekret" {
-		t.Errorf("ListenKey = %q, want sekret", cfg.ListenKey)
-	}
-	if !slices.Equal(cfg.APIKeys, []string{"k1", "k2"}) {
-		t.Errorf("APIKeys = %v, want [k1 k2]", cfg.APIKeys)
-	}
-	if cfg.Upstreams.OpenAIChat != defaultUpstreamOpenAI {
-		t.Errorf("OpenAIChat = %q, want default %q", cfg.Upstreams.OpenAIChat, defaultUpstreamOpenAI)
 	}
 	for alias, target := range map[string]string{
 		"fast":    "glm-5.3-flash",
@@ -44,66 +54,33 @@ func TestLoadConfigOverlayAndEnv(t *testing.T) {
 			t.Errorf("Models[%q] = %q, want %q", alias, cfg.Models[alias], target)
 		}
 	}
+	if !slices.Equal(cfg.ModelNames(), []string{"fast", "glm-5.2", "glm-5.3", "glm-5.3-flash"}) {
+		t.Errorf("ModelNames = %v", cfg.ModelNames())
+	}
 }
 
-func TestLoadConfigEnvKeysReplaceFileAndTrim(t *testing.T) {
+func TestLoadConfigRejectsLegacyFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	err := os.WriteFile(path, []byte(`{"apiKeys": ["file-key"]}`), 0o600)
+	err := os.WriteFile(path, []byte(`{"apiKeys": ["old-style"]}`), 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(envAPIKeys, " k1 , k2,, ")
-
-	cfg, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if !slices.Equal(cfg.APIKeys, []string{"k1", "k2"}) {
-		t.Errorf("APIKeys = %v, want [k1 k2]", cfg.APIKeys)
-	}
-}
-
-func TestLoadConfigMissingFileWithEnvUsesDefaults(t *testing.T) {
-	t.Setenv(envAPIKeys, "k1")
-	cfg, err := LoadConfig(filepath.Join(t.TempDir(), "missing.json"))
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if !slices.Equal(cfg.APIKeys, []string{"k1"}) {
-		t.Errorf("APIKeys = %v, want [k1]", cfg.APIKeys)
-	}
-	if cfg.Listen != defaultListen {
-		t.Errorf("Listen = %q, want default %q", cfg.Listen, defaultListen)
-	}
-}
-
-func TestLoadConfigMissingFileWithoutEnvFails(t *testing.T) {
-	t.Setenv(envAPIKeys, "")
-	_, err := LoadConfig(filepath.Join(t.TempDir(), "missing.json"))
+	_, err = LoadConfig(path, false)
 	if err == nil {
-		t.Fatal("LoadConfig on missing file without env keys, want error")
+		t.Fatal("config with apiKeys, want loud failure")
+	}
+	if !strings.Contains(err.Error(), "glms key add") {
+		t.Errorf("error does not tell the user where keys live now: %v", err)
 	}
 }
 
-func TestLoadConfigInvalidUpstream(t *testing.T) {
+func TestLoadConfigRejectsEmptyListen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	err := os.WriteFile(path, []byte(`{"upstreams": {"anthropic": "not a url"}}`), 0o600)
+	err := os.WriteFile(path, []byte(`{"listen": ""}`), 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(envAPIKeys, "k1")
-	if _, err := LoadConfig(path); err == nil {
-		t.Fatal("LoadConfig with invalid upstream URL, want error")
-	}
-}
-
-func TestValidateTrimsEmptyKeys(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.APIKeys = []string{" k1 ", "  ", "k2"}
-	if err := cfg.validate(); err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-	if !slices.Equal(cfg.APIKeys, []string{"k1", "k2"}) {
-		t.Errorf("APIKeys = %v, want [k1 k2]", cfg.APIKeys)
+	if _, err := LoadConfig(path, false); err == nil {
+		t.Fatal("empty listen, want error")
 	}
 }

@@ -15,29 +15,38 @@ import (
 // response shapes z.ai's own subscription UI uses. weekly/session remaining
 // per key are given as consumed fractions.
 type zaiUsageStub struct {
-	server   *httptest.Server
-	weekly   map[string]float64 // key -> remaining fraction
-	session  map[string]float64
-	plan     string
-	expiry   map[string]string // key -> renewal date (2006-01-02)
-	failKeys map[string]bool   // keys whose quota fetch returns 500
+	server     *httptest.Server
+	weekly     map[string]float64 // key -> remaining fraction
+	session    map[string]float64
+	plan       string
+	expiry     map[string]string // key -> renewal date (2006-01-02)
+	failKeys   map[string]bool   // keys whose quota fetch returns 500
+	rejectKeys map[string]bool   // keys whose quota fetch returns 401
 }
 
 func newZaiUsageStub(t *testing.T) *zaiUsageStub {
 	t.Helper()
 	defaultExpiry := time.Now().AddDate(0, 0, 30).Format("2006-01-02")
 	stub := &zaiUsageStub{
-		weekly:   map[string]float64{"k1": 0.8, "k2": 0.8},
-		session:  map[string]float64{"k1": 0.9, "k2": 0.9},
-		plan:     "GLM Coding Pro",
-		expiry:   map[string]string{"k1": defaultExpiry, "k2": defaultExpiry},
-		failKeys: map[string]bool{},
+		weekly:     map[string]float64{"k1": 0.8, "k2": 0.8},
+		session:    map[string]float64{"k1": 0.9, "k2": 0.9},
+		plan:       "GLM Coding Pro",
+		expiry:     map[string]string{"k1": defaultExpiry, "k2": defaultExpiry},
+		failKeys:   map[string]bool{},
+		rejectKeys: map[string]bool{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/monitor/usage/quota/limit", func(w http.ResponseWriter, r *http.Request) {
 		key := bearerKey(r)
 		if stub.failKeys[key] {
 			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if stub.rejectKeys[key] {
+			// The real console API rejects a bad key with HTTP 200 and an
+			// error envelope (verified 2026-11-07 against api.z.ai).
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"code":401,"msg":"token expired or incorrect","success":false}`)
 			return
 		}
 		// usage 1000, currentValue derived from the remaining fractions.
@@ -67,7 +76,7 @@ func bearerKey(r *http.Request) string {
 
 func TestUsageFetchParsesConsoleShapes(t *testing.T) {
 	stub := newZaiUsageStub(t)
-	m := newUsageMonitor(stub.server.URL)
+	m := newUsageMonitor(stub.server.URL, NewNullLogger())
 	m.refresh([]string{"k1", "k2"})
 
 	got := map[string]keyUsage{}
@@ -100,7 +109,7 @@ func TestUsageFetchParsesConsoleShapes(t *testing.T) {
 func TestUsageFailedFetchFallsBackToUnknown(t *testing.T) {
 	stub := newZaiUsageStub(t)
 	stub.failKeys["k1"] = true
-	m := newUsageMonitor(stub.server.URL)
+	m := newUsageMonitor(stub.server.URL, NewNullLogger())
 	m.refresh([]string{"k1", "k2"})
 
 	m.mu.Lock()
@@ -116,7 +125,7 @@ func TestUsageFailedFetchFallsBackToUnknown(t *testing.T) {
 }
 
 func TestCandidateOrderWeightedSpread(t *testing.T) {
-	m := newUsageMonitor("http://unused.example")
+	m := newUsageMonitor("http://unused.example", NewNullLogger())
 	now := time.Now()
 	m.mu.Lock()
 	m.state = map[int]keyUsage{
@@ -157,7 +166,7 @@ func TestCandidateOrderWeightedSpread(t *testing.T) {
 }
 
 func TestCandidateOrderEqualWeightsRotate(t *testing.T) {
-	m := newUsageMonitor("http://unused.example")
+	m := newUsageMonitor("http://unused.example", NewNullLogger())
 	now := time.Now()
 	// No state at all: three keys, all weight 1, must rotate in order.
 	var got []int

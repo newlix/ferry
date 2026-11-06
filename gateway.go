@@ -3,13 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -30,19 +30,46 @@ type route struct {
 	anthropic bool   // also authenticate with x-api-key, for the Anthropic protocol
 }
 
+// Logger splits output by importance: Quiet lines always print (startup,
+// key rotations, quota fetch failures); Verbose lines only with -v (one line
+// per request, quota refresh results). Quiet is the product; Verbose is
+// debugging.
+type Logger struct {
+	Quiet   *log.Logger
+	Verbose *log.Logger
+}
+
+func NewLogger(verbose bool) Logger {
+	out := io.Discard
+	if verbose {
+		out = os.Stderr
+	}
+	return Logger{
+		Quiet:   log.New(os.Stderr, "", log.LstdFlags),
+		Verbose: log.New(out, "", log.LstdFlags),
+	}
+}
+
+func NewNullLogger() Logger {
+	discard := log.New(io.Discard, "", 0)
+	return Logger{Quiet: discard, Verbose: discard}
+}
+
 type Gateway struct {
 	cfg        Config
 	client     *http.Client // no overall timeout: streams stay open as long as both sides do
 	sticky     stickySessions
 	usage      *usageMonitor
 	refreshing atomic.Bool
+	log        Logger
 }
 
-func NewGateway(cfg Config) *Gateway {
+func NewGateway(cfg Config, log Logger) *Gateway {
 	return &Gateway{
 		cfg:    cfg,
 		client: &http.Client{},
-		usage:  newUsageMonitor(cfg.Upstreams.Usage),
+		usage:  newUsageMonitor(cfg.Upstreams.Usage, log),
+		log:    log,
 	}
 }
 
@@ -95,18 +122,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			methodNotAllowed(w, http.MethodGet)
 			return
 		}
-		if !g.authRequest(r) {
-			gatewayAuthError(w, false)
-			return
-		}
 		g.handleModels(w)
 	case "/v1/usage":
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, http.MethodGet)
-			return
-		}
-		if !g.authRequest(r) {
-			gatewayAuthError(w, false)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"keys": g.usage.snapshot(len(g.cfg.APIKeys))})
@@ -127,10 +146,6 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 	start := time.Now()
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w, http.MethodPost)
-		return
-	}
-	if !g.authRequest(r) {
-		gatewayAuthError(w, rt.anthropic)
 		return
 	}
 	if len(g.cfg.APIKeys) == 0 {
@@ -195,7 +210,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 		resp, err = g.client.Do(req)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("upstream request failed: %v", err), rt.anthropic)
-			log.Printf("%s %s model=%s key=#%d status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, time.Since(start).Round(time.Millisecond), err)
+			g.log.Verbose.Printf("%s %s model=%s key=#%d status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, time.Since(start).Round(time.Millisecond), err)
 			return
 		}
 		// 401/403: key invalid or expired. 429: plan rate limit. These are the
@@ -206,7 +221,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 		reason := peekError(resp.Body)
 		resp.Body.Close()
 		next := order[(i+1)%len(order)]
-		log.Printf("%s %s model=%s key=#%d status=%d, trying key #%d: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, resp.StatusCode, next+1, reason)
+		g.log.Quiet.Printf("%s %s model=%s key=#%d status=%d, trying key #%d: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, resp.StatusCode, next+1, reason)
 		// The cached quota data said this key had room; refetch it.
 		g.refreshUsageAsync()
 	}
@@ -221,13 +236,13 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 	copyForwardedHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(out, resp.Body); err != nil {
-		log.Printf("%s %s: copy response: %v", r.Method, r.URL.Path, err)
+		g.log.Quiet.Printf("%s %s: copy response: %v", r.Method, r.URL.Path, err)
 	}
 	sessionLabel := ""
 	if sessionID != 0 {
 		sessionLabel = fmt.Sprintf(" session=%08x", sessionID)
 	}
-	log.Printf("%s %s model=%s key=#%d%s status=%d in=%dB out=%dB dur=%s", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, sessionLabel, resp.StatusCode, len(body), out.n, time.Since(start).Round(time.Millisecond))
+	g.log.Verbose.Printf("%s %s model=%s key=#%d%s status=%d in=%dB out=%dB dur=%s", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, sessionLabel, resp.StatusCode, len(body), out.n, time.Since(start).Round(time.Millisecond))
 }
 
 func (g *Gateway) handleModels(w http.ResponseWriter) {
@@ -237,19 +252,6 @@ func (g *Gateway) handleModels(w http.ResponseWriter) {
 		data = append(data, map[string]string{"id": name, "object": "model", "owned_by": "z-ai"})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
-}
-
-// authRequest checks the client-facing listenKey; empty means open access,
-// which is safe because the default listen address is localhost only.
-func (g *Gateway) authRequest(r *http.Request) bool {
-	if g.cfg.ListenKey == "" {
-		return true
-	}
-	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if got == "" {
-		got = r.Header.Get("X-Api-Key")
-	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(g.cfg.ListenKey)) == 1
 }
 
 // parseJSONObject returns nil for anything that is not a JSON object.
@@ -356,10 +358,6 @@ func modelLabel(requested, mapped string) string {
 	default:
 		return requested + "->" + mapped
 	}
-}
-
-func gatewayAuthError(w http.ResponseWriter, anthropic bool) {
-	writeError(w, http.StatusUnauthorized, "invalid gateway key (listenKey)", anthropic)
 }
 
 func methodNotAllowed(w http.ResponseWriter, allow string) {

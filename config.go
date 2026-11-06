@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,29 +18,28 @@ const (
 	defaultUpstreamResponses = "https://api.z.ai/api/v1"
 	defaultUpstreamAnthropic = "https://api.z.ai/api/anthropic"
 	defaultUpstreamUsage     = "https://api.z.ai"
-
-	// envAPIKeys holds comma-separated coding-plan keys and replaces the
-	// config file's apiKeys, so secrets can stay out of files.
-	envAPIKeys = "GLMS_API_KEY"
 )
 
 // A coding-plan key is accepted only on the coding endpoints below, not on
 // the general API endpoint https://api.z.ai/api/paas/v4.
 type Upstreams struct {
-	OpenAIChat      string `json:"openaiChat"`
-	OpenAIResponses string `json:"openaiResponses"`
-	Anthropic       string `json:"anthropic"`
-	// Usage is the console base the quota/subscription endpoints live on
-	// (https://api.z.ai, or https://open.bigmodel.cn for BigModel plans).
-	Usage string `json:"usage"`
+	OpenAIChat      string
+	OpenAIResponses string
+	Anthropic       string
+	// Usage is the console base the quota/subscription endpoints live on.
+	Usage string
 }
 
+// Config is the on-disk config file plus runtime-only fields. The file holds
+// just listen and models; keys come from the key store, upstreams are fixed.
+// The runtime fields carry json:"-" so a legacy config spelling them is an
+// unknown field and fails loudly instead of silently loading.
 type Config struct {
-	Listen    string            `json:"listen"`
-	ListenKey string            `json:"listenKey"`
-	APIKeys   []string          `json:"apiKeys"`
-	Upstreams Upstreams         `json:"upstreams"`
-	Models    map[string]string `json:"models"`
+	Listen string            `json:"listen"`
+	Models map[string]string `json:"models"`
+
+	APIKeys   []string  `json:"-"`
+	Upstreams Upstreams `json:"-"`
 }
 
 func DefaultConfig() Config {
@@ -60,32 +60,34 @@ func DefaultConfig() Config {
 }
 
 // LoadConfig reads path on top of the defaults; fields absent from the file
-// keep their defaults and the models map is merged with the defaults.
-func LoadConfig(path string) (Config, error) {
+// keep their defaults and the models map is merged with the defaults. A
+// missing file is only an error when the caller required it (an explicit
+// -config flag). Unknown fields are rejected so a pre-keychain config fails
+// loudly instead of silently losing its keys.
+func LoadConfig(path string, required bool) (Config, error) {
 	cfg := DefaultConfig()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) && os.Getenv(envAPIKeys) != "" {
-			if err := applyEnvKeys(&cfg); err != nil {
-				return Config{}, err
-			}
+		if errors.Is(err, os.ErrNotExist) && !required {
 			return cfg, cfg.validate()
 		}
-		return Config{}, fmt.Errorf("load config: %w (copy config.example.json to create one, or set %s)", err, envAPIKeys)
+		return Config{}, fmt.Errorf("load config: %w", err)
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
+		if strings.Contains(err.Error(), "unknown field") {
+			return Config{}, fmt.Errorf("parse %s: %w (the file holds only \"listen\" and \"models\"; keys now live in the key store: glms key add)", path, err)
+		}
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
-	if err := applyEnvKeys(&cfg); err != nil {
-		return Config{}, err
+	if dec.More() {
+		return Config{}, fmt.Errorf("parse %s: trailing data after JSON object", path)
 	}
-	if err := cfg.validate(); err != nil {
-		return Config{}, err
-	}
-	return cfg, nil
+	return cfg, cfg.validate()
 }
 
-func (c *Config) validate() error {
+func (c Config) validate() error {
 	if c.Listen == "" {
 		return errors.New("config: listen must not be empty")
 	}
@@ -100,13 +102,6 @@ func (c *Config) validate() error {
 			return fmt.Errorf("config: %s must be an http(s) URL, got %q", name, base)
 		}
 	}
-	var keys []string
-	for _, key := range c.APIKeys {
-		if key = strings.TrimSpace(key); key != "" {
-			keys = append(keys, key)
-		}
-	}
-	c.APIKeys = keys
 	for alias, target := range c.Models {
 		if alias == "" || target == "" {
 			return errors.New("config: models must map non-empty names to non-empty models")
@@ -124,29 +119,19 @@ func (c Config) ModelNames() []string {
 	return names
 }
 
-func applyEnvKeys(c *Config) error {
-	raw := os.Getenv(envAPIKeys)
-	if raw == "" {
-		return nil
+func configDir() string {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		return filepath.Join(dir, "glms")
 	}
-	c.APIKeys = nil
-	for _, part := range strings.Split(raw, ",") {
-		if key := strings.TrimSpace(part); key != "" {
-			c.APIKeys = append(c.APIKeys, key)
-		}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "glms"
 	}
-	return nil
+	return filepath.Join(home, ".config", "glms")
 }
 
 // defaultConfigPath follows the ~/.config convention shared with opencode,
 // not the macOS Application Support location os.UserConfigDir returns.
 func defaultConfigPath() string {
-	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-		return filepath.Join(dir, "glms", "config.json")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "glms.json"
-	}
-	return filepath.Join(home, ".config", "glms", "config.json")
+	return filepath.Join(configDir(), "config.json")
 }

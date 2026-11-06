@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,31 +13,56 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
-		log.Fatal(err)
+	if err := dispatch(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "glms:", err)
+		os.Exit(1)
 	}
 }
 
-func run() error {
-	configPath := flag.String("config", defaultConfigPath(), "config file path")
-	listen := flag.String("listen", "", "listen address, overrides config")
-	flag.Parse()
-
-	cfg, err := LoadConfig(*configPath)
-	if err != nil {
-		return err
+func dispatch(args []string) error {
+	if len(args) == 0 {
+		return cmdRun(args)
 	}
-	if *listen != "" {
-		cfg.Listen = *listen
+	switch args[0] {
+	case "run":
+		return cmdRun(args[1:])
+	case "status":
+		cfg, err := LoadConfig(defaultConfigPath(), false)
+		if err != nil {
+			return err
+		}
+		return cmdStatus(cfg, NewKeyStore(configDir()), os.Stdout)
+	case "install":
+		return cmdInstall()
+	case "uninstall":
+		return cmdUninstall()
+	case "key":
+		if len(args) >= 2 {
+			switch args[1] {
+			case "add":
+				cfg, err := LoadConfig(defaultConfigPath(), false)
+				if err != nil {
+					return err
+				}
+				return cmdKeyAdd(cfg, NewKeyStore(configDir()), os.Stdin, os.Stdout)
+			case "remove":
+				return cmdKeyRemove(NewKeyStore(configDir()), args[2:])
+			case "list":
+				return cmdKeyList(NewKeyStore(configDir()))
+			}
+		}
+		return errors.New("usage: glms key add | glms key remove NAME | glms key list")
+	default:
+		printUsage(os.Stdout)
+		return fmt.Errorf("unknown command %q", args[0])
 	}
-	if len(cfg.APIKeys) == 0 {
-		return fmt.Errorf("no upstream API keys: set apiKeys in %s or export %s=<key>", *configPath, envAPIKeys)
-	}
+}
 
-	gw := NewGateway(cfg)
-
+func serve(cfg Config, log Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	gw := NewGateway(cfg, log)
 	gw.StartUsageLoop(ctx)
 
 	srv := &http.Server{
@@ -51,7 +74,7 @@ func run() error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
 
-	log.Printf("glms listening on http://%s (keys: %d, models: %s)", cfg.Listen, len(cfg.APIKeys), strings.Join(cfg.ModelNames(), ", "))
+	log.Quiet.Printf("glms listening on http://%s (%d key(s), models: %s)", cfg.Listen, len(cfg.APIKeys), strings.Join(cfg.ModelNames(), ", "))
 
 	select {
 	case err := <-serveErr:
@@ -62,7 +85,7 @@ func run() error {
 	case <-ctx.Done():
 	}
 
-	log.Printf("shutting down")
+	log.Quiet.Printf("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {

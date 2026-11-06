@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sort"
 	"sync"
@@ -36,16 +35,18 @@ type keyUsage struct {
 type usageMonitor struct {
 	client *http.Client
 	base   string
+	log    Logger
 
 	mu    sync.Mutex
 	state map[int]keyUsage // keyed by apiKeys index
 	cw    map[int]float64  // smooth weighted round-robin current weights
 }
 
-func newUsageMonitor(base string) *usageMonitor {
+func newUsageMonitor(base string, log Logger) *usageMonitor {
 	return &usageMonitor{
 		client: &http.Client{Timeout: usageHTTPTimeout},
 		base:   base,
+		log:    log,
 		state:  map[int]keyUsage{},
 	}
 }
@@ -59,13 +60,13 @@ func (m *usageMonitor) refresh(keys []string) {
 			m.mu.Lock()
 			delete(m.state, i)
 			m.mu.Unlock()
-			log.Printf("usage key=#%d: fetch failed: %v", i+1, err)
+			m.log.Quiet.Printf("usage key=#%d: fetch failed: %v", i+1, err)
 			continue
 		}
 		m.mu.Lock()
 		m.state[i] = u
 		m.mu.Unlock()
-		log.Printf("usage key=#%d plan=%q weekly=%.0f%% session=%.0f%% expires=%s", i+1, u.planName, u.weeklyRem*100, u.sessionRem*100, usageExpiryLabel(u.expiry))
+		m.log.Verbose.Printf("usage key=#%d plan=%q weekly=%.0f%% session=%.0f%% expires=%s", i+1, u.planName, u.weeklyRem*100, u.sessionRem*100, usageExpiryLabel(u.expiry))
 	}
 }
 
@@ -147,6 +148,20 @@ func (m *usageMonitor) fetchSubscription(key string) (plan string, expiry time.T
 	return plan, expiry, nil
 }
 
+// consoleError marks an endpoint reply the caller can act on: the console
+// API answers a bad key with HTTP 200 and {"code":401,"msg":"token expired
+// or incorrect"}, so the envelope code, not the HTTP status, says the key is
+// bad. Transport failures reuse the type with the HTTP status as the code.
+type consoleError struct {
+	path string
+	code int
+	msg  string
+}
+
+func (e *consoleError) Error() string {
+	return fmt.Sprintf("GET %s: code %d: %s", e.path, e.code, e.msg)
+}
+
 func (m *usageMonitor) getJSON(path, key string, out any) error {
 	req, err := http.NewRequest(http.MethodGet, m.base+path, nil)
 	if err != nil {
@@ -159,10 +174,24 @@ func (m *usageMonitor) getJSON(path, key string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: status %d", path, resp.StatusCode)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, usageMaxBody))
+	if err != nil {
+		return err
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, usageMaxBody)).Decode(out)
+	if resp.StatusCode != http.StatusOK {
+		return &consoleError{path: path, code: resp.StatusCode, msg: "http status"}
+	}
+	var envelope struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return fmt.Errorf("GET %s: parse: %w", path, err)
+	}
+	if envelope.Code != 0 && envelope.Code != 200 {
+		return &consoleError{path: path, code: envelope.Code, msg: envelope.Msg}
+	}
+	return json.Unmarshal(body, out)
 }
 
 // Key weights: equal weight spreads traffic evenly. A key within
