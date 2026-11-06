@@ -24,10 +24,16 @@ const maxRequestBody = 512 << 20
 // logging when a key is rotated.
 const maxLoggedErrorBody = 8 << 10
 
-type route struct {
+type upstream struct {
 	base      string // upstream base URL, e.g. https://api.z.ai/api/anthropic
 	path      string // appended to base, e.g. /v1/messages
 	anthropic bool   // also authenticate with x-api-key, for the Anthropic protocol
+}
+
+type route struct {
+	method string
+	path   string
+	handle http.HandlerFunc
 }
 
 // Logger splits output by importance: Quiet lines always print (startup,
@@ -57,6 +63,7 @@ func NewNullLogger() Logger {
 
 type Gateway struct {
 	cfg        Config
+	routes     []route
 	client     *http.Client // no overall timeout: streams stay open as long as both sides do
 	sticky     stickySessions
 	usage      *usageMonitor
@@ -65,12 +72,22 @@ type Gateway struct {
 }
 
 func NewGateway(cfg Config, log Logger) *Gateway {
-	return &Gateway{
+	g := &Gateway{
 		cfg:    cfg,
 		client: &http.Client{},
 		usage:  newUsageMonitor(cfg.Upstreams.Usage, log),
 		log:    log,
 	}
+	g.routes = []route{
+		{http.MethodGet, "/health", g.handleHealth},
+		{http.MethodGet, "/v1/models", g.handleModels},
+		{http.MethodGet, "/v1/usage", g.handleUsage},
+		{http.MethodPost, "/v1/chat/completions", g.proxyRoute(upstream{base: cfg.Upstreams.OpenAIChat, path: "/chat/completions"})},
+		{http.MethodPost, "/v1/responses", g.proxyRoute(upstream{base: cfg.Upstreams.OpenAIResponses, path: "/responses"})},
+		{http.MethodPost, "/v1/messages", g.proxyRoute(upstream{base: cfg.Upstreams.Anthropic, path: "/v1/messages", anthropic: true})},
+		{http.MethodPost, "/v1/messages/count_tokens", g.proxyRoute(upstream{base: cfg.Upstreams.Anthropic, path: "/v1/messages/count_tokens", anthropic: true})},
+	}
+	return g
 }
 
 // RefreshUsage synchronously refetches quota data for all keys.
@@ -110,64 +127,56 @@ func (g *Gateway) StartUsageLoop(ctx context.Context) {
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	switch r.URL.Path {
-	case "/health":
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w, http.MethodGet)
+	for _, rt := range g.routes {
+		if r.URL.Path != rt.path {
+			continue
+		}
+		if r.Method != rt.method {
+			methodNotAllowed(w, rt.method)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	case "/v1/models":
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w, http.MethodGet)
-			return
-		}
-		g.handleModels(w)
-	case "/v1/usage":
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w, http.MethodGet)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"keys": g.usage.snapshot(len(g.cfg.APIKeys))})
-	case "/v1/chat/completions":
-		g.proxy(w, r, route{base: g.cfg.Upstreams.OpenAIChat, path: "/chat/completions"})
-	case "/v1/responses":
-		g.proxy(w, r, route{base: g.cfg.Upstreams.OpenAIResponses, path: "/responses"})
-	case "/v1/messages":
-		g.proxy(w, r, route{base: g.cfg.Upstreams.Anthropic, path: "/v1/messages", anthropic: true})
-	case "/v1/messages/count_tokens":
-		g.proxy(w, r, route{base: g.cfg.Upstreams.Anthropic, path: "/v1/messages/count_tokens", anthropic: true})
-	default:
-		http.NotFound(w, r)
+		rt.handle(w, r)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (g *Gateway) proxyRoute(u upstream) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		g.proxy(w, r, u)
 	}
 }
 
-func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
+func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (g *Gateway) handleUsage(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"keys": g.usage.snapshot(len(g.cfg.APIKeys))})
+}
+
+func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	start := time.Now()
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w, http.MethodPost)
-		return
-	}
 	if len(g.cfg.APIKeys) == 0 {
-		writeError(w, http.StatusServiceUnavailable, "gateway has no upstream API keys configured", rt.anthropic)
+		writeError(w, http.StatusServiceUnavailable, "gateway has no upstream API keys configured", u.anthropic)
 		return
 	}
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("read request body: %v", err), rt.anthropic)
+		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("read request body: %v", err), u.anthropic)
 		return
 	}
 
 	obj := parseJSONObject(body)
 	requested, mapped, body := applyModelAlias(obj, body, g.cfg.Models)
 
-	u, err := url.Parse(rt.base + rt.path)
+	target, err := url.Parse(u.base + u.path)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("bad upstream URL: %v", err), rt.anthropic)
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("bad upstream URL: %v", err), u.anthropic)
 		return
 	}
-	u.RawQuery = r.URL.RawQuery
+	target.RawQuery = r.URL.RawQuery
 
 	// Key order comes from quota data (see usageMonitor.candidateOrder):
 	// smooth weighted round-robin over the usable keys — equal weights, so
@@ -199,17 +208,17 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 	keyIdx := order[0]
 	for i, idx := range order {
 		keyIdx = idx
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, u.String(), bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
 		if err != nil {
-			writeError(w, http.StatusBadGateway, fmt.Sprintf("build upstream request: %v", err), rt.anthropic)
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("build upstream request: %v", err), u.anthropic)
 			return
 		}
 		copyForwardedHeaders(req.Header, r.Header)
-		setUpstreamAuth(req.Header, rt, g.cfg.APIKeys[keyIdx])
+		setUpstreamAuth(req.Header, u, g.cfg.APIKeys[keyIdx])
 
 		resp, err = g.client.Do(req)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, fmt.Sprintf("upstream request failed: %v", err), rt.anthropic)
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("upstream request failed: %v", err), u.anthropic)
 			g.log.Verbose.Printf("%s %s model=%s key=#%d status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, time.Since(start).Round(time.Millisecond), err)
 			return
 		}
@@ -245,7 +254,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 	g.log.Verbose.Printf("%s %s model=%s key=#%d%s status=%d in=%dB out=%dB dur=%s", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, sessionLabel, resp.StatusCode, len(body), out.n, time.Since(start).Round(time.Millisecond))
 }
 
-func (g *Gateway) handleModels(w http.ResponseWriter) {
+func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 	names := g.cfg.ModelNames()
 	data := make([]map[string]string, 0, len(names))
 	for _, name := range names {
@@ -308,9 +317,9 @@ func copyForwardedHeaders(dst, src http.Header) {
 	}
 }
 
-func setUpstreamAuth(h http.Header, rt route, key string) {
+func setUpstreamAuth(h http.Header, u upstream, key string) {
 	h.Set("Authorization", "Bearer "+key)
-	if rt.anthropic {
+	if u.anthropic {
 		h.Set("X-Api-Key", key)
 	}
 }
