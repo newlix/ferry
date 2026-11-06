@@ -36,14 +36,17 @@ func run() error {
 		return fmt.Errorf("no upstream API keys: set apiKeys in %s or export %s=<key>", *configPath, envAPIKeys)
 	}
 
-	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           NewGateway(cfg),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	gw := NewGateway(cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	gw.StartUsageLoop(ctx)
+
+	srv := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           gw,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()

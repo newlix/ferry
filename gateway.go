@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -30,14 +31,56 @@ type route struct {
 }
 
 type Gateway struct {
-	cfg     Config
-	client  *http.Client // no overall timeout: streams stay open as long as both sides do
-	nextKey atomic.Uint64
-	sticky  stickySessions
+	cfg        Config
+	client     *http.Client // no overall timeout: streams stay open as long as both sides do
+	nextKey    atomic.Uint64
+	sticky     stickySessions
+	usage      *usageMonitor
+	refreshing atomic.Bool
 }
 
 func NewGateway(cfg Config) *Gateway {
-	return &Gateway{cfg: cfg, client: &http.Client{}}
+	return &Gateway{
+		cfg:    cfg,
+		client: &http.Client{},
+		usage:  newUsageMonitor(cfg.Upstreams.Usage),
+	}
+}
+
+// RefreshUsage synchronously refetches quota data for all keys.
+func (g *Gateway) RefreshUsage() {
+	g.usage.refresh(g.cfg.APIKeys)
+}
+
+// refreshUsageAsync refetches quota data at most once at a time; the failover
+// path calls it after a 429 because its cached data is stale.
+func (g *Gateway) refreshUsageAsync() {
+	if !g.refreshing.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer g.refreshing.Store(false)
+		g.usage.refresh(g.cfg.APIKeys)
+	}()
+}
+
+// StartUsageLoop refreshes quota data in the background every
+// usageRefreshInterval until ctx is done. Never blocks startup: until the
+// first refresh lands, key selection falls back to round-robin.
+func (g *Gateway) StartUsageLoop(ctx context.Context) {
+	g.refreshUsageAsync()
+	go func() {
+		ticker := time.NewTicker(usageRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				g.usage.refresh(g.cfg.APIKeys)
+			}
+		}
+	}()
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +101,16 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.handleModels(w)
+	case "/v1/usage":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		if !g.authRequest(r) {
+			gatewayAuthError(w, false)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"keys": g.usage.snapshot(len(g.cfg.APIKeys))})
 	case "/v1/chat/completions":
 		g.proxy(w, r, route{base: g.cfg.Upstreams.OpenAIChat, path: "/chat/completions"})
 	case "/v1/responses":
@@ -102,27 +155,40 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 	}
 	u.RawQuery = r.URL.RawQuery
 
-	// Keys are tried round-robin, starting from a rotating position so a
-	// rate-limited key is not hit first on every request. A conversation with
-	// a stable message prefix sticks to its key (prompt-cache friendly on
-	// multi-account setups); the failover loop below rebinds it. A retry
-	// happens only while nothing has been written to the client yet, which is
-	// always the case here: the response body is forwarded only after the
-	// loop picked the final response.
-	var resp *http.Response
+	// Key order comes from quota data (see usageMonitor.candidateOrder):
+	// keys with weekly quota left first, soonest plan expiry first among
+	// them, most remaining first; exhausted or expired keys last. With no
+	// usage data at all (quota endpoint unreachable), the order rotates
+	// round-robin so load still spreads. A conversation with a stable message
+	// prefix sticks to its key while that key is still usable (prompt-cache
+	// friendly on multi-account setups); the failover loop below rebinds it.
+	// A retry happens only while nothing has been written to the client yet,
+	// which is always the case here: the response body is forwarded only
+	// after the loop picked the final response.
+	order := g.usage.candidateOrder(len(g.cfg.APIKeys), start)
+	if g.usage.allUnknown(len(g.cfg.APIKeys)) {
+		rot := int(g.nextKey.Add(1)-1) % len(order)
+		order = append(order[rot:], order[:rot]...)
+	}
 	sessionID := uint64(0)
-	keyStart := int(g.nextKey.Add(1)-1) % len(g.cfg.APIKeys)
 	if len(g.cfg.APIKeys) > 1 {
 		sessionID = affinityID(obj, mapped)
 		if sessionID != 0 {
-			if k := g.sticky.get(sessionID, start); k >= 0 {
-				keyStart = k
+			if k := g.sticky.get(sessionID, start); k >= 0 && g.usage.usable(k) {
+				rest := make([]int, 0, len(order)-1)
+				for _, idx := range order {
+					if idx != k {
+						rest = append(rest, idx)
+					}
+				}
+				order = append([]int{k}, rest...)
 			}
 		}
 	}
-	keyIdx := 0
-	for i := range g.cfg.APIKeys {
-		keyIdx = (keyStart + i) % len(g.cfg.APIKeys)
+	var resp *http.Response
+	keyIdx := order[0]
+	for i, idx := range order {
+		keyIdx = idx
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, u.String(), bytes.NewReader(body))
 		if err != nil {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("build upstream request: %v", err), rt.anthropic)
@@ -139,13 +205,15 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 		}
 		// 401/403: key invalid or expired. 429: plan rate limit. These are the
 		// failures another key can fix; everything else is passed through.
-		if !slices.Contains([]int{http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests}, resp.StatusCode) || i == len(g.cfg.APIKeys)-1 {
+		if !slices.Contains([]int{http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests}, resp.StatusCode) || i == len(order)-1 {
 			break
 		}
 		reason := peekError(resp.Body)
 		resp.Body.Close()
-		next := (keyIdx + 1) % len(g.cfg.APIKeys)
+		next := order[(i+1)%len(order)]
 		log.Printf("%s %s model=%s key=#%d status=%d, trying key #%d: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, resp.StatusCode, next+1, reason)
+		// The cached quota data said this key had room; refetch it.
+		g.refreshUsageAsync()
 	}
 	defer resp.Body.Close()
 

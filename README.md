@@ -5,9 +5,10 @@ vibe coding, debugging and RSI.
 
 glms is a local API gateway in front of the GLM Coding Plan (z.ai). Tools talk
 to `127.0.0.1:8787` with a throwaway local key; glms injects the real
-coding-plan key, rewrites model names through an alias map, keeps each
-conversation on one key (prompt-cache friendly on multi-account setups), and
-fails over across keys when one hits a rate limit.
+coding-plan key, rewrites model names through an alias map, picks the key
+with the most future left (weekly quota remaining, plan expiry), keeps each
+conversation on one key (prompt-cache friendly), and fails over across keys
+when one hits a rate limit.
 
 ```
 opencode / Claude Code / any tool
@@ -15,6 +16,7 @@ opencode / Claude Code / any tool
         ▼
 glms (127.0.0.1:8787)
         │  Authorization: Bearer <coding-plan key>
+        │  key order: weekly quota left → soonest expiry → most remaining
         │  one conversation → one key (sticky); 401/403/429 → next key + rebind
         ▼
 api.z.ai coding endpoints
@@ -28,6 +30,7 @@ api.z.ai coding endpoints
 | `POST /v1/responses` | `https://api.z.ai/api/v1/responses` |
 | `POST /v1/messages` (+ `/v1/messages/count_tokens`) | `https://api.z.ai/api/anthropic/v1/messages` |
 | `GET /v1/models` | local: the models configured below |
+| `GET /v1/usage` | local: per-key quota, plan and expiry |
 | `GET /health` | local |
 
 Requests and responses pass through byte-for-byte (SSE streams included,
@@ -96,6 +99,7 @@ keep the defaults, the `models` map is merged with the defaults).
 | `upstreams.openaiChat` | z.ai coding endpoint | Base URL appended with `/chat/completions` |
 | `upstreams.openaiResponses` | z.ai responses endpoint | Base URL appended with `/responses` |
 | `upstreams.anthropic` | z.ai anthropic endpoint | Base URL appended with `/v1/messages` |
+| `upstreams.usage` | `https://api.z.ai` | Console base for the quota/subscription endpoints (`https://open.bigmodel.cn` for BigModel plans) |
 | `models` | `glm-5.3`, `glm-5.3-flash`, `glm-5.2` | Alias → upstream model; unknown names pass through unchanged |
 
 `GLMS_API_KEY` (comma-separated) replaces `apiKeys`, so keys can stay out of
@@ -103,14 +107,25 @@ files. `-listen` overrides `listen`.
 
 ## Behavior notes
 
-- Key selection is sticky per conversation. The protocols carry no session
-  identifier, so a conversation is identified by a hash of the model plus the
-  first message of the request (the system prompt for coding agents — the only
-  element guaranteed identical across turns); every request with that prefix
-  uses the key the conversation started with. On multi-account setups this
-  keeps prompt-cache hits inside one account; different conversations still
-  spread round-robin across keys. Failover on 401/403/429 rebinds the
-  conversation to the key that worked. Bindings expire after 30 idle minutes.
+- Key selection is quota-aware. Every 5 minutes (and right after any 429
+  failover) glms reads each key's remaining 5-hour and weekly quota, plan
+  name and renewal date from the console endpoints z.ai's own subscription
+  UI uses (`/api/monitor/usage/quota/limit` and `/api/biz/subscription/list`,
+  undocumented but stable in practice). New conversations and failover try
+  keys in this order: keys with quota left first, soonest plan expiry first
+  (credits vanish at expiry, so spend them first), then most weekly
+  remaining; keys with unknown quota follow in config order; exhausted or
+  expired keys last. With no usage data at all, selection falls back to
+  round-robin. `curl http://127.0.0.1:8787/v1/usage` shows what glms sees.
+- Selection is sticky per conversation on top of that. The protocols carry
+  no session identifier, so a conversation is identified by a hash of the
+  model plus the first message of the request (the system prompt for coding
+  agents — the only element guaranteed identical across turns); every request
+  with that prefix uses the key the conversation started with, until that
+  key runs out of quota (skipped pre-emptively) or returns 401/403/429
+  (rebound to the key that worked). On multi-account setups this keeps
+  prompt-cache hits inside one account. Bindings expire after 30 idle
+  minutes.
 - One log line per proxied request on stdout: path, model (alias→target if
   rewritten), key index used, conversation hash, status, bytes in/out,
   duration. Key rotations are logged with the upstream error body (first 200

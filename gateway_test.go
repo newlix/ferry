@@ -70,16 +70,17 @@ func expectAuth(t *testing.T, seen chan string) string {
 	}
 }
 
-func newTestGateway(t *testing.T, mutate func(*Config)) (*httptest.Server, Config) {
+func newTestGateway(t *testing.T, mutate func(*Config)) (*httptest.Server, *Gateway) {
 	t.Helper()
 	cfg := DefaultConfig()
 	cfg.APIKeys = []string{"k1", "k2"}
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	srv := httptest.NewServer(NewGateway(cfg))
+	gw := NewGateway(cfg)
+	srv := httptest.NewServer(gw)
 	t.Cleanup(srv.Close)
-	return srv, cfg
+	return srv, gw
 }
 
 func postJSON(t *testing.T, url string, headers map[string]string, body string) *http.Response {

@@ -5,7 +5,8 @@
   "upstreams": {
     "openaiChat": "https://api.z.ai/api/coding/paas/v4",
     "openaiResponses": "https://api.z.ai/api/v1",
-    "anthropic": "https://api.z.ai/api/anthropic"
+    "anthropic": "https://api.z.ai/api/anthropic",
+    "usage": "https://api.z.ai"
   },
   "models": {
     "glm-5.3": "glm-5.3",

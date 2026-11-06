@@ -16,6 +16,7 @@ const (
 	defaultUpstreamOpenAI    = "https://api.z.ai/api/coding/paas/v4"
 	defaultUpstreamResponses = "https://api.z.ai/api/v1"
 	defaultUpstreamAnthropic = "https://api.z.ai/api/anthropic"
+	defaultUpstreamUsage     = "https://api.z.ai"
 
 	// envAPIKeys holds comma-separated coding-plan keys and replaces the
 	// config file's apiKeys, so secrets can stay out of files.
@@ -28,6 +29,9 @@ type Upstreams struct {
 	OpenAIChat      string `json:"openaiChat"`
 	OpenAIResponses string `json:"openaiResponses"`
 	Anthropic       string `json:"anthropic"`
+	// Usage is the console base the quota/subscription endpoints live on
+	// (https://api.z.ai, or https://open.bigmodel.cn for BigModel plans).
+	Usage string `json:"usage"`
 }
 
 type Config struct {
@@ -45,6 +49,7 @@ func DefaultConfig() Config {
 			OpenAIChat:      defaultUpstreamOpenAI,
 			OpenAIResponses: defaultUpstreamResponses,
 			Anthropic:       defaultUpstreamAnthropic,
+			Usage:           defaultUpstreamUsage,
 		},
 		Models: map[string]string{
 			"glm-5.3":       "glm-5.3",
@@ -88,6 +93,7 @@ func (c *Config) validate() error {
 		"upstreams.openaiChat":      c.Upstreams.OpenAIChat,
 		"upstreams.openaiResponses": c.Upstreams.OpenAIResponses,
 		"upstreams.anthropic":       c.Upstreams.Anthropic,
+		"upstreams.usage":           c.Upstreams.Usage,
 	} {
 		u, err := url.Parse(base)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
