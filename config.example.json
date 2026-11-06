@@ -1,0 +1,15 @@
+{
+  "listen": "127.0.0.1:8787",
+  "listenKey": "",
+  "apiKeys": ["paste your GLM Coding Plan API key here"],
+  "upstreams": {
+    "openaiChat": "https://api.z.ai/api/coding/paas/v4",
+    "openaiResponses": "https://api.z.ai/api/v1",
+    "anthropic": "https://api.z.ai/api/anthropic"
+  },
+  "models": {
+    "glm-5.3": "glm-5.3",
+    "glm-5.3-flash": "glm-5.3-flash",
+    "glm-5.2": "glm-5.2"
+  }
+}
