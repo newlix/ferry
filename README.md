@@ -5,15 +5,17 @@ vibe coding, debugging and RSI.
 
 glms is a local API gateway in front of the GLM Coding Plan (z.ai). Tools talk
 to `127.0.0.1:8787` with a throwaway local key; glms injects the real
-coding-plan key, rewrites model names through an alias map, and fails over
-across multiple keys when one hits a rate limit.
+coding-plan key, rewrites model names through an alias map, keeps each
+conversation on one key (prompt-cache friendly on multi-account setups), and
+fails over across keys when one hits a rate limit.
 
 ```
 opencode / Claude Code / any tool
         │  Authorization: Bearer <listenKey>
         ▼
 glms (127.0.0.1:8787)
-        │  Authorization: Bearer <coding-plan key>, rotated on 401/403/429
+        │  Authorization: Bearer <coding-plan key>
+        │  one conversation → one key (sticky); 401/403/429 → next key + rebind
         ▼
 api.z.ai coding endpoints
 ```
@@ -101,10 +103,18 @@ files. `-listen` overrides `listen`.
 
 ## Behavior notes
 
+- Key selection is sticky per conversation. The protocols carry no session
+  identifier, so a conversation is identified by a hash of the model plus the
+  first message of the request (the system prompt for coding agents — the only
+  element guaranteed identical across turns); every request with that prefix
+  uses the key the conversation started with. On multi-account setups this
+  keeps prompt-cache hits inside one account; different conversations still
+  spread round-robin across keys. Failover on 401/403/429 rebinds the
+  conversation to the key that worked. Bindings expire after 30 idle minutes.
 - One log line per proxied request on stdout: path, model (alias→target if
-  rewritten), key index used, status, bytes in/out, duration. Key rotations
-  are logged with the upstream error body (first 200 chars, key material
-  never).
+  rewritten), key index used, conversation hash, status, bytes in/out,
+  duration. Key rotations are logged with the upstream error body (first 200
+  chars, key material never).
 - Failover replays the buffered request with the next key only while nothing
   has been sent to the client yet — always true, because the response is
   forwarded only after the loop picks the final response. Network errors and

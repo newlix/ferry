@@ -59,6 +59,17 @@ func expectRequest(t *testing.T, requests chan capturedRequest) capturedRequest 
 	}
 }
 
+func expectAuth(t *testing.T, seen chan string) string {
+	t.Helper()
+	select {
+	case auth := <-seen:
+		return auth
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream received no request within 5s")
+		return ""
+	}
+}
+
 func newTestGateway(t *testing.T, mutate func(*Config)) (*httptest.Server, Config) {
 	t.Helper()
 	cfg := DefaultConfig()
@@ -360,12 +371,13 @@ func TestModelsAndHealthAndUnknownRoutes(t *testing.T) {
 	}
 }
 
-func TestRewriteModel(t *testing.T) {
+func TestApplyModelAlias(t *testing.T) {
 	aliases := map[string]string{"fast": "glm-5.3-flash"}
 
-	requested, out := rewriteModel([]byte(`{"model":"fast","seed":9007199254740993,"messages":[{"role":"user"}]}`), aliases)
-	if requested != "fast" {
-		t.Errorf("requested = %q, want fast", requested)
+	in := []byte(`{"model":"fast","seed":9007199254740993,"messages":[{"role":"user"}]}`)
+	requested, mapped, out := applyModelAlias(parseJSONObject(in), in, aliases)
+	if requested != "fast" || mapped != "glm-5.3-flash" {
+		t.Errorf("requested = %q, mapped = %q, want fast -> glm-5.3-flash", requested, mapped)
 	}
 	var got map[string]json.RawMessage
 	if err := json.Unmarshal(out, &got); err != nil {
@@ -379,18 +391,21 @@ func TestRewriteModel(t *testing.T) {
 		t.Errorf("seed = %s, want 9007199254740993 kept exactly", got["seed"])
 	}
 
-	requested, out = rewriteModel([]byte(`{"model":"unknown","x":1}`), aliases)
-	if requested != "unknown" || !bytes.Equal(out, []byte(`{"model":"unknown","x":1}`)) {
-		t.Errorf("unknown model: requested = %q, out = %s, want passthrough", requested, out)
+	in = []byte(`{"model":"unknown","x":1}`)
+	requested, mapped, out = applyModelAlias(parseJSONObject(in), in, aliases)
+	if requested != "unknown" || mapped != "unknown" || !bytes.Equal(out, in) {
+		t.Errorf("unknown model: requested = %q, mapped = %q, out = %s, want passthrough", requested, mapped, out)
 	}
 
-	requested, out = rewriteModel([]byte(`not json`), aliases)
-	if requested != "" || !bytes.Equal(out, []byte(`not json`)) {
-		t.Errorf("non-JSON body: requested = %q, out = %s, want passthrough", requested, out)
+	in = []byte(`not json`)
+	requested, mapped, out = applyModelAlias(parseJSONObject(in), in, aliases)
+	if requested != "" || mapped != "" || !bytes.Equal(out, in) {
+		t.Errorf("non-JSON body: requested = %q, mapped = %q, out = %s, want passthrough", requested, mapped, out)
 	}
 
-	requested, out = rewriteModel([]byte(`{"messages":[]}`), aliases)
-	if requested != "" || !bytes.Equal(out, []byte(`{"messages":[]}`)) {
-		t.Errorf("missing model: requested = %q, out = %s, want passthrough", requested, out)
+	in = []byte(`{"messages":[]}`)
+	requested, mapped, out = applyModelAlias(parseJSONObject(in), in, aliases)
+	if requested != "" || mapped != "" || !bytes.Equal(out, in) {
+		t.Errorf("missing model: requested = %q, mapped = %q, out = %s, want passthrough", requested, mapped, out)
 	}
 }

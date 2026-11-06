@@ -33,6 +33,7 @@ type Gateway struct {
 	cfg     Config
 	client  *http.Client // no overall timeout: streams stay open as long as both sides do
 	nextKey atomic.Uint64
+	sticky  stickySessions
 }
 
 func NewGateway(cfg Config) *Gateway {
@@ -91,11 +92,8 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 		return
 	}
 
-	requested, body := rewriteModel(body, g.cfg.Models)
-	mapped := requested
-	if target, ok := g.cfg.Models[requested]; ok && target != "" {
-		mapped = target
-	}
+	obj := parseJSONObject(body)
+	requested, mapped, body := applyModelAlias(obj, body, g.cfg.Models)
 
 	u, err := url.Parse(rt.base + rt.path)
 	if err != nil {
@@ -105,13 +103,24 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 	u.RawQuery = r.URL.RawQuery
 
 	// Keys are tried round-robin, starting from a rotating position so a
-	// rate-limited key is not hit first on every request. A retry happens
-	// only while nothing has been written to the client yet, which is always
-	// the case here: the response body is forwarded only after the loop
-	// picked the final response.
+	// rate-limited key is not hit first on every request. A conversation with
+	// a stable message prefix sticks to its key (prompt-cache friendly on
+	// multi-account setups); the failover loop below rebinds it. A retry
+	// happens only while nothing has been written to the client yet, which is
+	// always the case here: the response body is forwarded only after the
+	// loop picked the final response.
 	var resp *http.Response
-	keyIdx := 0
+	sessionID := uint64(0)
 	keyStart := int(g.nextKey.Add(1)-1) % len(g.cfg.APIKeys)
+	if len(g.cfg.APIKeys) > 1 {
+		sessionID = affinityID(obj, mapped)
+		if sessionID != 0 {
+			if k := g.sticky.get(sessionID, start); k >= 0 {
+				keyStart = k
+			}
+		}
+	}
+	keyIdx := 0
 	for i := range g.cfg.APIKeys {
 		keyIdx = (keyStart + i) % len(g.cfg.APIKeys)
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, u.String(), bytes.NewReader(body))
@@ -140,13 +149,22 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 	}
 	defer resp.Body.Close()
 
+	// Rebind even when the loop never rotated: this refreshes lastUsed.
+	if sessionID != 0 {
+		g.sticky.put(sessionID, keyIdx, start)
+	}
+
 	out := newStreamWriter(w)
 	copyForwardedHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(out, resp.Body); err != nil {
 		log.Printf("%s %s: copy response: %v", r.Method, r.URL.Path, err)
 	}
-	log.Printf("%s %s model=%s key=#%d status=%d in=%dB out=%dB dur=%s", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, resp.StatusCode, len(body), out.n, time.Since(start).Round(time.Millisecond))
+	sessionLabel := ""
+	if sessionID != 0 {
+		sessionLabel = fmt.Sprintf(" session=%08x", sessionID)
+	}
+	log.Printf("%s %s model=%s key=#%d%s status=%d in=%dB out=%dB dur=%s", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, sessionLabel, resp.StatusCode, len(body), out.n, time.Since(start).Round(time.Millisecond))
 }
 
 func (g *Gateway) handleModels(w http.ResponseWriter) {
@@ -171,35 +189,40 @@ func (g *Gateway) authRequest(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(g.cfg.ListenKey)) == 1
 }
 
-// rewriteModel replaces the top-level "model" field through the alias map.
-// The body is rebuilt from json.RawMessage so every other value keeps its
-// exact bytes (int64 precision, string escaping).
-func rewriteModel(body []byte, aliases map[string]string) (requested string, out []byte) {
+// parseJSONObject returns nil for anything that is not a JSON object.
+func parseJSONObject(body []byte) map[string]json.RawMessage {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil {
-		return "", body
+		return nil
+	}
+	return obj
+}
+
+// applyModelAlias maps the top-level "model" through the alias map. The body
+// is rebuilt from json.RawMessage so every other value keeps its exact bytes
+// (int64 precision, string escaping).
+func applyModelAlias(obj map[string]json.RawMessage, body []byte, aliases map[string]string) (requested, mapped string, out []byte) {
+	if obj == nil {
+		return "", "", body
 	}
 	raw, ok := obj["model"]
-	if !ok {
-		return "", body
-	}
-	if err := json.Unmarshal(raw, &requested); err != nil {
-		return "", body
+	if !ok || json.Unmarshal(raw, &requested) != nil {
+		return "", "", body
 	}
 	target, ok := aliases[requested]
-	if !ok || target == requested {
-		return requested, body
+	if !ok || target == "" || target == requested {
+		return requested, requested, body
 	}
 	modelJSON, err := json.Marshal(target)
 	if err != nil {
-		return requested, body
+		return requested, requested, body
 	}
 	obj["model"] = modelJSON
 	rewritten, err := json.Marshal(obj)
 	if err != nil {
-		return requested, body
+		return requested, requested, body
 	}
-	return requested, rewritten
+	return requested, target, rewritten
 }
 
 // copyForwardedHeaders copies end-to-end headers in either direction,
