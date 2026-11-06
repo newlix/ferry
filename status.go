@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -15,14 +15,20 @@ import (
 // directly from the console endpoints, so it works even when the gateway
 // itself is down.
 func cmdStatus(cfg Config, store KeyStore, out io.Writer) error {
-	state, install := "not running", "not a service — glms install starts it at login"
-	if healthCheck(cfg.Listen) {
-		state = "running at http://" + cfg.Listen
+	running := healthCheck(cfg.Listen)
+	line := "glms not running"
+	if running {
+		line = "glms running at http://" + cfg.Listen
 	}
-	if serviceInstalled() {
-		install = "LaunchAgent installed"
+	switch {
+	case serviceInstalled() && running:
+		line += " (starts at login)"
+	case serviceInstalled() && !running:
+		line += " (starts at login; logs: " + filepath.Join(configDir(), "glms.log") + ")"
+	case !serviceInstalled() && !running:
+		line += " (glms install starts it at login)"
 	}
-	fmt.Fprintf(out, "glms — %s (%s)\n\n", state, install)
+	fmt.Fprintf(out, "%s\n\n", line)
 
 	names, err := store.Names()
 	if err != nil {
@@ -48,23 +54,27 @@ func cmdStatus(cfg Config, store KeyStore, out io.Writer) error {
 func renderKeyStatus(out io.Writer, name string, u keyUsage, err error) {
 	if err != nil {
 		var ce *consoleError
-		if errors.As(err, &ce) && (ce.code == 401 || ce.code == 403) {
-			fmt.Fprintf(out, "  %-14s invalid key — remove it:  glms key remove %s\n", name, name)
+		if errors.As(err, &ce) {
+			if ce.code == 401 || ce.code == 403 {
+				fmt.Fprintf(out, "  %-14s invalid key. Remove it:  glms key remove %s\n", name, name)
+				return
+			}
+			fmt.Fprintf(out, "  %-14s quota unknown (z.ai error: %s)\n", name, ce.msg)
 			return
 		}
-		fmt.Fprintf(out, "  %-14s unreachable: %v\n", name, err)
+		fmt.Fprintf(out, "  %-14s quota unknown (could not reach z.ai)\n", name)
 		return
 	}
 
-	line := fmt.Sprintf("  %-14s %-8s %s ", name, planLabel(u), bar(u.weeklyRem))
+	line := fmt.Sprintf("  %-14s %-8s ", name, planLabel(u))
 	switch {
 	case u.weeklyRem <= 0:
-		line += "out this week"
+		line += "out of quota this week"
 		if !u.weeklyReset.IsZero() {
-			line += " — resets in " + relTime(time.Until(u.weeklyReset))
+			line += " · resets in " + relTime(time.Until(u.weeklyReset))
 		}
 	default:
-		line += fmt.Sprintf("%3.0f%% this week", u.weeklyRem*100)
+		line += fmt.Sprintf("%.0f%% this week", u.weeklyRem*100)
 		if !u.weeklyReset.IsZero() {
 			line += " · resets in " + relTime(time.Until(u.weeklyReset))
 		}
@@ -111,18 +121,6 @@ func relTime(d time.Duration) string {
 		days := int(d.Hours() / 24)
 		return fmt.Sprintf("%dd %dh", days, int(d.Hours())-days*24)
 	}
-}
-
-func bar(frac float64) string {
-	const width = 10
-	if frac < 0 {
-		frac = 0
-	}
-	if frac > 1 {
-		frac = 1
-	}
-	filled := int(math.Round(frac * width))
-	return strings.Repeat("▓", filled) + strings.Repeat("░", width-filled)
 }
 
 func healthCheck(listen string) bool {

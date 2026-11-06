@@ -25,14 +25,13 @@ func printUsage(out io.Writer) {
 
 Usage:
   glms               run the gateway in the foreground (first run asks for a key)
-  glms status        show plans, quota and service state
-  glms key add       add a coding-plan key (verified, stored in the Keychain)
+  glms status        show keys, plans, quota and running state
+  glms key add       add a GLM Coding Plan key (verified, stored in the Keychain)
   glms key remove    remove a key by name
-  glms key list      list key names
-  glms install       run at login as a LaunchAgent
-  glms uninstall     remove the LaunchAgent
+  glms install       start glms at login
+  glms uninstall     stop starting at login
 
-Run flags: -config PATH, -listen ADDR, -v (log every request)
+Run flags: -v (log every request)
 `)
 }
 
@@ -40,25 +39,14 @@ Run flags: -config PATH, -listen ADDR, -v (log every request)
 // HTTP until the process is stopped.
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	configPath := fs.String("config", defaultConfigPath(), "config file")
-	listen := fs.String("listen", "", "listen address, overrides config")
 	verbose := fs.Bool("v", false, "log every request")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	explicitConfig := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "config" {
-			explicitConfig = true
-		}
-	})
 
-	cfg, err := LoadConfig(*configPath, explicitConfig)
+	cfg, err := LoadConfig(defaultConfigPath())
 	if err != nil {
 		return err
-	}
-	if *listen != "" {
-		cfg.Listen = *listen
 	}
 
 	store := NewKeyStore(configDir())
@@ -67,17 +55,20 @@ func cmdRun(args []string) error {
 	}
 	if len(cfg.APIKeys) == 0 {
 		if !isTerminal(os.Stdin) {
-			return errors.New("no keys yet — run:  glms key add")
+			return errors.New("no keys yet. Add one:  glms key add")
 		}
-		fmt.Println("No Z.AI key yet. Add one now (empty answer skips).")
-		if err := cmdKeyAdd(cfg, store, os.Stdin, os.Stdout); err != nil {
+		fmt.Println("No GLM Coding Plan key yet. Add one now.")
+		if err := cmdKeyAdd(cfg, store, os.Stdin, os.Stdout, false); err != nil {
 			return err
+		}
+		if serviceInstalled() {
+			// The login service loads the key on its next restart; serving
+			// here would only fight it for the port.
+			fmt.Println("glms starts at login and now has a key. Check it:  glms status")
+			return nil
 		}
 		if err := loadKeys(&cfg, store); err != nil {
 			return err
-		}
-		if len(cfg.APIKeys) == 0 {
-			return errors.New("still no key — run:  glms key add")
 		}
 	}
 	return serve(cfg, NewLogger(*verbose))
@@ -96,28 +87,26 @@ func loadKeys(cfg *Config, store KeyStore) error {
 		if err != nil {
 			return fmt.Errorf("load key %q: %w", name, err)
 		}
-		cfg.APIKeys = append(cfg.APIKeys, secret)
+		cfg.APIKeys = append(cfg.APIKeys, apiKey{Name: name, Secret: secret})
 	}
 	return nil
 }
 
-func cmdKeyAdd(cfg Config, store KeyStore, in io.Reader, out io.Writer) error {
+// cmdKeyAdd asks for the key first (what the user came holding) and the name
+// after verification, when the plan it shows can inspire the name.
+func cmdKeyAdd(cfg Config, store KeyStore, in io.Reader, out io.Writer, suggestInstall bool) error {
 	names, err := store.Names()
 	if err != nil {
 		return err
 	}
 	reader := bufio.NewReader(in)
-	name := promptDefault(reader, out, "Name", fmt.Sprintf("key%d", len(names)+1))
-	if slices.Contains(names, name) {
-		return fmt.Errorf("a key named %q already exists (remove it first: glms key remove %s)", name, name)
-	}
-	fmt.Fprintln(out, "Paste your GLM Coding Plan API key (hidden on a terminal).")
+	fmt.Fprintln(out, "Paste your GLM Coding Plan key (hidden while typing).")
 	secret, err := readSecret(reader, isTerminalReader(in))
 	if err != nil {
 		return err
 	}
 	if secret == "" {
-		return errors.New("empty key, nothing saved")
+		return errors.New("no key entered, nothing saved. Add one with:  glms key add")
 	}
 
 	m := newUsageMonitor(cfg.Upstreams.Usage, NewNullLogger())
@@ -125,44 +114,54 @@ func cmdKeyAdd(cfg Config, store KeyStore, in io.Reader, out io.Writer) error {
 	var ce *consoleError
 	switch {
 	case verr == nil:
-		fmt.Fprintf(out, "Verified: %s, weekly %.0f%% left (resets in %s).\n", planLabel(u), u.weeklyRem*100, relTime(time.Until(u.weeklyReset)))
+		fmt.Fprintf(out, "Verified: %s, %.0f%% left this week (resets in %s).\n", planLabel(u), u.weeklyRem*100, relTime(time.Until(u.weeklyReset)))
 	case errors.As(verr, &ce) && (ce.code == 401 || ce.code == 403):
-		return fmt.Errorf("z.ai rejected this key (%s) — nothing saved", ce.msg)
+		return fmt.Errorf("z.ai rejected this key (%s). Nothing saved", ce.msg)
 	default:
 		fmt.Fprintf(out, "Could not verify this key (%v); saving anyway.\n", verr)
+	}
+
+	name := promptDefault(reader, out, "Name this key", defaultKeyName(names))
+	if slices.Contains(names, name) {
+		return fmt.Errorf("a key named %q already exists (remove it first: glms key remove %s)", name, name)
 	}
 	if err := store.Add(name, secret); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "Added %q.\n", name)
-	restartServiceIfInstalled(out)
+	applyKeyChange(out, suggestInstall)
 	return nil
+}
+
+// defaultKeyName picks the first unused keyN so accepting the default can
+// never collide (len(names)+1 would, after a removal).
+func defaultKeyName(names []string) string {
+	for i := 1; ; i++ {
+		if name := fmt.Sprintf("key%d", i); !slices.Contains(names, name) {
+			return name
+		}
+	}
 }
 
 func cmdKeyRemove(store KeyStore, args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: glms key remove NAME (see: glms key list)")
+		return errors.New("usage: glms key remove NAME (see: glms status)")
+	}
+	names, err := store.Names()
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(names, args[0]) {
+		return fmt.Errorf("no key named %q (see:  glms status)", args[0])
+	}
+	if serviceInstalled() && len(names) == 1 {
+		return fmt.Errorf("%q is the last key, and glms starts at login. Add another key first or stop starting at login:  glms uninstall", args[0])
 	}
 	if err := store.Remove(args[0]); err != nil {
 		return err
 	}
 	fmt.Printf("Removed %q.\n", args[0])
-	restartServiceIfInstalled(os.Stdout)
-	return nil
-}
-
-func cmdKeyList(store KeyStore) error {
-	names, err := store.Names()
-	if err != nil {
-		return err
-	}
-	if len(names) == 0 {
-		fmt.Println("No keys yet. Add one:  glms key add")
-		return nil
-	}
-	for _, name := range names {
-		fmt.Println(name)
-	}
+	applyKeyChange(os.Stdout, false)
 	return nil
 }
 
@@ -174,7 +173,7 @@ func cmdInstall(store KeyStore) error {
 	if len(names) == 0 {
 		// Installing keyless would bootstrap a service that exits and is
 		// restarted by KeepAlive forever.
-		return errors.New("no keys yet — add one first:  glms key add")
+		return errors.New("no keys yet. Add one:  glms key add")
 	}
 	execPath, err := os.Executable()
 	if err != nil {
@@ -199,10 +198,10 @@ func cmdInstall(store KeyStore) error {
 	exec.Command(launchctlBin, "bootout", domain+"/"+serviceLabel).Run()
 	waitServiceGone(domain, 3*time.Second)
 	if out, err := exec.Command(launchctlBin, "bootstrap", domain, plist).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl bootstrap: %v: %s", err, out)
+		return fmt.Errorf("could not start glms at login: %v: %s", err, out)
 	}
 	time.Sleep(500 * time.Millisecond)
-	cfg, err := LoadConfig(defaultConfigPath(), false)
+	cfg, err := LoadConfig(defaultConfigPath())
 	if err != nil {
 		return err
 	}
@@ -220,7 +219,7 @@ func cmdUninstall() error {
 	if err := os.Remove(plistPath()); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	fmt.Println("Removed the LaunchAgent.")
+	fmt.Println("glms no longer starts at login.")
 	return nil
 }
 
@@ -237,19 +236,22 @@ func waitServiceGone(domain string, timeout time.Duration) {
 	}
 }
 
-// restartServiceIfInstalled applies key changes without making the user
-// think about launchctl.
-func restartServiceIfInstalled(out io.Writer) {
+// applyKeyChange restarts an installed glms so a key change takes effect at
+// once. suggestInstall is false on first run and after a removal: the install
+// hint would interrupt the flow the user is already in.
+func applyKeyChange(out io.Writer, suggestInstall bool) {
 	if !serviceInstalled() {
-		fmt.Fprintln(out, "Not running as a service. Start it at login with:  glms install")
+		if suggestInstall {
+			fmt.Fprintln(out, "Not set to start at login. Set it with:  glms install")
+		}
 		return
 	}
 	uid := strconv.Itoa(os.Getuid())
-	if out2, err := exec.Command(launchctlBin, "kickstart", "-k", "gui/"+uid+"/"+serviceLabel).CombinedOutput(); err != nil {
-		fmt.Fprintf(out, "Could not restart the service (%v: %s); restart it with:  launchctl kickstart -k gui/%s/%s\n", err, out2, uid, serviceLabel)
+	if err := exec.Command(launchctlBin, "kickstart", "-k", "gui/"+uid+"/"+serviceLabel).Run(); err != nil {
+		fmt.Fprintf(out, "Could not restart glms; the new keys load at your next login (logs: %s)\n", filepath.Join(configDir(), "glms.log"))
 		return
 	}
-	fmt.Fprintln(out, "Service restarted.")
+	fmt.Fprintln(out, "Restarted with the new keys.")
 }
 
 // serviceInstalled is a var so tests can pin the answer regardless of the

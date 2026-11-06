@@ -78,7 +78,7 @@ func bearerKey(r *http.Request) string {
 func TestUsageFetchParsesConsoleShapes(t *testing.T) {
 	stub := newZaiUsageStub(t)
 	m := newUsageMonitor(stub.server.URL, NewNullLogger())
-	m.refresh([]string{"k1", "k2"})
+	m.refresh([]apiKey{{Secret: "k1"}, {Secret: "k2"}})
 
 	got := map[string]keyUsage{}
 	m.mu.Lock()
@@ -114,7 +114,7 @@ func TestUsageFailedFetchFallsBackToUnknown(t *testing.T) {
 	stub := newZaiUsageStub(t)
 	stub.failKeys["k1"] = true
 	m := newUsageMonitor(stub.server.URL, NewNullLogger())
-	m.refresh([]string{"k1", "k2"})
+	m.refresh([]apiKey{{Secret: "k1"}, {Secret: "k2"}})
 
 	m.mu.Lock()
 	_, k1Known := m.state[0]

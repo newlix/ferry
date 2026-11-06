@@ -73,7 +73,7 @@ func expectAuth(t *testing.T, seen chan string) string {
 func newTestGateway(t *testing.T, mutate func(*Config)) (*httptest.Server, *Gateway) {
 	t.Helper()
 	cfg := DefaultConfig()
-	cfg.APIKeys = []string{"k1", "k2"}
+	cfg.APIKeys = []apiKey{{Name: "key1", Secret: "k1"}, {Name: "key2", Secret: "k2"}}
 	if mutate != nil {
 		mutate(&cfg)
 	}
@@ -229,7 +229,7 @@ func TestProxyExhaustedKeysReturnsUpstreamError(t *testing.T) {
 	upstream, _ := runUpstream(t, http.StatusTooManyRequests, `{"error":{"message":"rate limited"}}`)
 	srv, _ := newTestGateway(t, func(c *Config) {
 		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
-		c.APIKeys = []string{"k1"}
+		c.APIKeys = []apiKey{{Name: "key1", Secret: "k1"}}
 	})
 
 	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)

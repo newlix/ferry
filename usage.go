@@ -55,20 +55,20 @@ func newUsageMonitor(base string, log Logger) *usageMonitor {
 
 // refresh fetches usage for every key. A key whose fetch fails becomes
 // "unknown" and keeps working: ordering falls back to config order.
-func (m *usageMonitor) refresh(keys []string) {
+func (m *usageMonitor) refresh(keys []apiKey) {
 	for i := range keys {
-		u, err := m.fetchKey(keys[i])
+		u, err := m.fetchKey(keys[i].Secret)
 		if err != nil {
 			m.mu.Lock()
 			delete(m.state, i)
 			m.mu.Unlock()
-			m.log.Quiet.Printf("usage key=#%d: fetch failed: %v", i+1, err)
+			m.log.Quiet.Printf("usage key=%s: fetch failed: %v", keys[i].Name, err)
 			continue
 		}
 		m.mu.Lock()
 		m.state[i] = u
 		m.mu.Unlock()
-		m.log.Verbose.Printf("usage key=#%d plan=%q weekly=%.0f%% (resets %s) session=%.0f%% (resets %s)", i+1, u.planName, u.weeklyRem*100, relTime(time.Until(u.weeklyReset)), u.sessionRem*100, relTime(time.Until(u.sessionReset)))
+		m.log.Verbose.Printf("usage key=%s plan=%q weekly=%.0f%% (resets %s) session=%.0f%% (resets %s)", keys[i].Name, u.planName, u.weeklyRem*100, relTime(time.Until(u.weeklyReset)), u.sessionRem*100, relTime(time.Until(u.sessionReset)))
 	}
 }
 

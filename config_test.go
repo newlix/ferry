@@ -9,7 +9,7 @@ import (
 )
 
 func TestLoadConfigMissingFileGivesDefaults(t *testing.T) {
-	cfg, err := LoadConfig(filepath.Join(t.TempDir(), "missing.json"), false)
+	cfg, err := LoadConfig(filepath.Join(t.TempDir(), "missing.json"))
 	if err != nil {
 		t.Fatalf("LoadConfig optional missing file: %v", err)
 	}
@@ -24,12 +24,6 @@ func TestLoadConfigMissingFileGivesDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadConfigExplicitPathMustExist(t *testing.T) {
-	if _, err := LoadConfig(filepath.Join(t.TempDir(), "missing.json"), true); err == nil {
-		t.Fatal("LoadConfig required missing file, want error")
-	}
-}
-
 func TestLoadConfigOverridesAndMergesModels(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	err := os.WriteFile(path, []byte(`{
@@ -39,7 +33,7 @@ func TestLoadConfigOverridesAndMergesModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfig(path, false)
+	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -65,7 +59,7 @@ func TestLoadConfigRejectsLegacyFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = LoadConfig(path, false)
+	_, err = LoadConfig(path)
 	if err == nil {
 		t.Fatal("config with apiKeys, want loud failure")
 	}
@@ -80,7 +74,7 @@ func TestLoadConfigRejectsEmptyListen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadConfig(path, false); err == nil {
+	if _, err := LoadConfig(path); err == nil {
 		t.Fatal("empty listen, want error")
 	}
 }

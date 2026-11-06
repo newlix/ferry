@@ -3,8 +3,8 @@
 This project is written entirely by agents and is fully optimized for agent
 vibe coding, debugging and RSI.
 
-glms is a local API gateway in front of the GLM Coding Plan (z.ai). You add
-your coding-plan key once; after that glms picks the right key for every
+glms is a local API gateway in front of the GLM Coding Plan (z.ai). You add a
+GLM Coding Plan key once; after that glms picks the right key for every
 request (quota left, plan expiry), keeps each conversation on one account
 (prompt-cache friendly), and fails over across keys on rate limits. Tools
 talk to `127.0.0.1:8787` and never see a real key.
@@ -25,17 +25,16 @@ api.z.ai coding endpoints
 
 ```sh
 go build -o /usr/local/bin/glms .
-glms            # first run: paste your coding-plan key (hidden input), then it serves
-glms status     # plans, quota bars, service state
-glms install    # run at login as a LaunchAgent (logs: ~/.config/glms/glms.log)
+glms            # first run: paste your GLM Coding Plan key (input hidden), name it, then it serves
+glms status     # keys, plans, quota, running state
+glms install    # start at login (logs: ~/.config/glms/glms.log)
 ```
 
 Keys are verified when added (plan name, quota, expiry are fetched and
 shown) and stored in the macOS Keychain; on other systems they fall back to
-`~/.config/glms/keys.json` (0600). `glms key add`, `glms key remove NAME`,
-`glms key list` manage them; the running service restarts itself after a
-key change. By default glms is quiet — start it with `-v` to log every
-request.
+`~/.config/glms/keys.json` (0600). `glms key add` and `glms key remove NAME`
+manage them (`glms status` lists them); glms restarts itself after a key
+change. By default glms is quiet — start it with `-v` to log every request.
 
 ## opencode
 
@@ -92,6 +91,13 @@ Optional file `~/.config/glms/config.json` — everything has a default:
 | `listen` | `127.0.0.1:8787` | Listen address; localhost only |
 | `models` | `glm-5.3`, `glm-5.3-flash`, `glm-5.2` | Alias → upstream model (merged with the defaults); unknown names pass through unchanged |
 
+The one config most tools need is an alias, so a client-baked model name
+reaches a real model:
+
+```jsonc
+{"models": {"claude-sonnet-4-5": "glm-5.3"}}
+```
+
 Keys live in the Keychain, never in this file; a config that still carries
 `apiKeys` or `upstreams` from an older glms fails loudly with a hint.
 
@@ -119,7 +125,7 @@ Keys live in the Keychain, never in this file; a config that still carries
   prompt-cache hits inside one account. Bindings expire after 30 idle
   minutes.
 - Quiet output is the product; `-v` adds one line per request (path, model
-  alias→target, key index, conversation hash, status, bytes, duration). Key
+  alias→target, key name, conversation hash, status, bytes, duration). Key
   rotations and quota fetch failures always print. Key material never
   appears in logs.
 - Gateway-generated errors use the shape of the protocol on that route

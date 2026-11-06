@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -38,8 +37,15 @@ type Config struct {
 	Listen string            `json:"listen"`
 	Models map[string]string `json:"models"`
 
-	APIKeys   []string  `json:"-"`
+	APIKeys   []apiKey  `json:"-"`
 	Upstreams Upstreams `json:"-"`
+}
+
+// apiKey pairs a key's store name with its secret: status and logs show the
+// name, requests carry the secret.
+type apiKey struct {
+	Name   string
+	Secret string
 }
 
 func DefaultConfig() Config {
@@ -61,14 +67,13 @@ func DefaultConfig() Config {
 
 // LoadConfig reads path on top of the defaults; fields absent from the file
 // keep their defaults and the models map is merged with the defaults. A
-// missing file is only an error when the caller required it (an explicit
-// -config flag). Unknown fields are rejected so a pre-keychain config fails
-// loudly instead of silently losing its keys.
-func LoadConfig(path string, required bool) (Config, error) {
+// missing file means defaults. Unknown fields are rejected so a pre-keychain
+// config fails loudly instead of silently losing its keys.
+func LoadConfig(path string) (Config, error) {
 	cfg := DefaultConfig()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) && !required {
+		if errors.Is(err, os.ErrNotExist) {
 			return cfg, cfg.validate()
 		}
 		return Config{}, fmt.Errorf("load config: %w", err)
@@ -90,17 +95,6 @@ func LoadConfig(path string, required bool) (Config, error) {
 func (c Config) validate() error {
 	if c.Listen == "" {
 		return errors.New("config: listen must not be empty")
-	}
-	for name, base := range map[string]string{
-		"upstreams.openaiChat":      c.Upstreams.OpenAIChat,
-		"upstreams.openaiResponses": c.Upstreams.OpenAIResponses,
-		"upstreams.anthropic":       c.Upstreams.Anthropic,
-		"upstreams.usage":           c.Upstreams.Usage,
-	} {
-		u, err := url.Parse(base)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("config: %s must be an http(s) URL, got %q", name, base)
-		}
 	}
 	for alias, target := range c.Models {
 		if alias == "" || target == "" {

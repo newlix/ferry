@@ -20,16 +20,14 @@ func main() {
 }
 
 func dispatch(args []string) error {
-	// Bare glms and glms with run flags (-v, -listen, -config) both run the
-	// gateway; only words select a verb.
+	// Bare glms and glms with run flags (-v) both run the gateway; only
+	// words select a verb.
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return cmdRun(args)
 	}
 	switch args[0] {
-	case "run":
-		return cmdRun(args[1:])
 	case "status":
-		cfg, err := LoadConfig(defaultConfigPath(), false)
+		cfg, err := LoadConfig(defaultConfigPath())
 		if err != nil {
 			return err
 		}
@@ -42,18 +40,16 @@ func dispatch(args []string) error {
 		if len(args) >= 2 {
 			switch args[1] {
 			case "add":
-				cfg, err := LoadConfig(defaultConfigPath(), false)
+				cfg, err := LoadConfig(defaultConfigPath())
 				if err != nil {
 					return err
 				}
-				return cmdKeyAdd(cfg, NewKeyStore(configDir()), os.Stdin, os.Stdout)
+				return cmdKeyAdd(cfg, NewKeyStore(configDir()), os.Stdin, os.Stdout, true)
 			case "remove":
 				return cmdKeyRemove(NewKeyStore(configDir()), args[2:])
-			case "list":
-				return cmdKeyList(NewKeyStore(configDir()))
 			}
 		}
-		return errors.New("usage: glms key add | glms key remove NAME | glms key list")
+		return errors.New("usage: glms key add | glms key remove NAME")
 	default:
 		printUsage(os.Stdout)
 		return fmt.Errorf("unknown command %q", args[0])
@@ -76,11 +72,19 @@ func serve(cfg Config, log Logger) error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
 
-	log.Quiet.Printf("glms listening on http://%s (%d key(s), models: %s)", cfg.Listen, len(cfg.APIKeys), strings.Join(cfg.ModelNames(), ", "))
+	n := len(cfg.APIKeys)
+	plural := "s"
+	if n == 1 {
+		plural = ""
+	}
+	log.Quiet.Printf("glms listening on http://%s (%d key%s)", cfg.Listen, n, plural)
 
 	select {
 	case err := <-serveErr:
 		if !errors.Is(err, http.ErrServerClosed) {
+			if errors.Is(err, syscall.EADDRINUSE) {
+				return fmt.Errorf("%s is already in use; another glms may be running. Check with:  glms status", cfg.Listen)
+			}
 			return err
 		}
 		return nil

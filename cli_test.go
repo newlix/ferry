@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"net"
 	"strings"
 	"testing"
 )
@@ -16,8 +17,8 @@ func TestCmdKeyAddSavesVerifiedKey(t *testing.T) {
 	pinServiceInstalled(t, false)
 
 	var out bytes.Buffer
-	in := strings.NewReader("pro\nsk-good\n")
-	if err := cmdKeyAdd(cfg, store, in, &out); err != nil {
+	in := strings.NewReader("sk-good\npro\n")
+	if err := cmdKeyAdd(cfg, store, in, &out, false); err != nil {
 		t.Fatalf("cmdKeyAdd: %v (output: %s)", err, out.String())
 	}
 	names, _ := store.Names()
@@ -42,7 +43,7 @@ func TestCmdKeyAddRejectsKeyZaiRefuses(t *testing.T) {
 	pinServiceInstalled(t, false)
 
 	var out bytes.Buffer
-	err := cmdKeyAdd(cfg, store, strings.NewReader("pro\nsk-bad\n"), &out)
+	err := cmdKeyAdd(cfg, store, strings.NewReader("sk-bad\npro\n"), &out, false)
 	if err == nil {
 		t.Fatal("rejected key saved, want error")
 	}
@@ -63,7 +64,7 @@ func TestCmdKeyAddSavesUnverifiableKeyWithWarning(t *testing.T) {
 	pinServiceInstalled(t, false)
 
 	var out bytes.Buffer
-	if err := cmdKeyAdd(cfg, store, strings.NewReader("pro\nsk-flaky\n"), &out); err != nil {
+	if err := cmdKeyAdd(cfg, store, strings.NewReader("sk-flaky\npro\n"), &out, false); err != nil {
 		t.Fatalf("cmdKeyAdd: %v", err)
 	}
 	if !strings.Contains(out.String(), "Could not verify") {
@@ -79,7 +80,7 @@ func TestCmdKeyAddRefusesDuplicateName(t *testing.T) {
 	if err := store.Add("pro", "sk-1"); err != nil {
 		t.Fatal(err)
 	}
-	err := cmdKeyAdd(DefaultConfig(), store, strings.NewReader("pro\nsk-x\n"), &bytes.Buffer{})
+	err := cmdKeyAdd(DefaultConfig(), store, strings.NewReader("sk-x\npro\n"), &bytes.Buffer{}, false)
 	if err == nil {
 		t.Fatal("duplicate name accepted, want error")
 	}
@@ -98,12 +99,26 @@ func TestCmdInstallRefusesWithoutKeys(t *testing.T) {
 
 func TestPromptDefault(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader("myname\n"))
-	if got := promptDefault(r, &bytes.Buffer{}, "Name", "key1"); got != "myname" {
+	if got := promptDefault(r, &bytes.Buffer{}, "Name this key", "key1"); got != "myname" {
 		t.Errorf("promptDefault = %q, want myname", got)
 	}
 	r = bufio.NewReader(strings.NewReader("\n"))
-	if got := promptDefault(r, &bytes.Buffer{}, "Name", "key1"); got != "key1" {
+	if got := promptDefault(r, &bytes.Buffer{}, "Name this key", "key1"); got != "key1" {
 		t.Errorf("promptDefault empty = %q, want default key1", got)
+	}
+}
+
+// Accepting the default name must never collide, even after a removal made
+// len(names)+1 point at an existing name.
+func TestDefaultKeyName(t *testing.T) {
+	if got := defaultKeyName(nil); got != "key1" {
+		t.Errorf("defaultKeyName(nil) = %q, want key1", got)
+	}
+	if got := defaultKeyName([]string{"key1", "key3"}); got != "key2" {
+		t.Errorf("defaultKeyName = %q, want key2 (first unused)", got)
+	}
+	if got := defaultKeyName([]string{"key1", "key2", "key3"}); got != "key4" {
+		t.Errorf("defaultKeyName = %q, want key4", got)
 	}
 }
 
@@ -127,6 +142,20 @@ func TestPlistContent(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("plist missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestServePortInUse(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	cfg := DefaultConfig()
+	cfg.Listen = ln.Addr().String()
+	err = serve(cfg, NewNullLogger())
+	if err == nil || !strings.Contains(err.Error(), "already in use") {
+		t.Fatalf("serve on a taken port = %v, want the friendly already-in-use error", err)
 	}
 }
 

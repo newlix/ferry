@@ -7,24 +7,6 @@ import (
 	"time"
 )
 
-func TestBar(t *testing.T) {
-	tests := []struct {
-		frac float64
-		want string
-	}{
-		{0, "░░░░░░░░░░"},
-		{0.62, "▓▓▓▓▓▓░░░░"},
-		{1, "▓▓▓▓▓▓▓▓▓▓"},
-		{-1, "░░░░░░░░░░"},
-		{2, "▓▓▓▓▓▓▓▓▓▓"},
-	}
-	for _, tt := range tests {
-		if got := bar(tt.frac); got != tt.want {
-			t.Errorf("bar(%v) = %s, want %s", tt.frac, got, tt.want)
-		}
-	}
-}
-
 func TestRenderKeyStatus(t *testing.T) {
 	render := func(u keyUsage) string {
 		var out bytes.Buffer
@@ -37,7 +19,7 @@ func TestRenderKeyStatus(t *testing.T) {
 	healthy := keyUsage{ok: true, planName: "GLM Coding Max", weeklyRem: 0.8, sessionRem: 0.9,
 		weeklyReset: time.Now().Add(60*time.Hour + 30*time.Minute), sessionReset: time.Now().Add(3*time.Hour + 30*time.Minute)}
 	got := render(healthy)
-	for _, want := range []string{"Max", "▓▓▓▓▓▓▓▓░░", " 80% this week", "· resets in 2d 12h"} {
+	for _, want := range []string{"Max", "80% this week", "· resets in 2d 12h"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("healthy line missing %q: %s", want, got)
 		}
@@ -64,7 +46,7 @@ func TestRenderKeyStatus(t *testing.T) {
 	weeklyOut := healthy
 	weeklyOut.weeklyRem = 0
 	got = render(weeklyOut)
-	for _, want := range []string{"out this week", "— resets in"} {
+	for _, want := range []string{"out of quota this week", "· resets in"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("exhausted line missing %q: %s", want, got)
 		}
@@ -81,7 +63,7 @@ func TestRenderKeyStatus(t *testing.T) {
 
 	var out bytes.Buffer
 	renderKeyStatus(&out, "pro", keyUsage{}, errString("boom"))
-	if !strings.Contains(out.String(), "unreachable: boom") {
+	if !strings.Contains(out.String(), "quota unknown (could not reach z.ai)") {
 		t.Errorf("error render = %s", out.String())
 	}
 }
@@ -106,7 +88,7 @@ func TestCmdStatus(t *testing.T) {
 		t.Fatalf("cmdStatus: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"not running", "Pro", " 80% this week", "resets in"} {
+	for _, want := range []string{"not running", "Pro", "80% this week", "resets in"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("status output missing %q:\n%s", want, got)
 		}
@@ -132,7 +114,7 @@ func TestCmdStatusInvalidKey(t *testing.T) {
 	if err := cmdStatus(cfg, store, &out); err != nil {
 		t.Fatalf("cmdStatus: %v", err)
 	}
-	if !strings.Contains(out.String(), "invalid key — remove it:  glms key remove pro") {
+	if !strings.Contains(out.String(), "invalid key. Remove it:  glms key remove pro") {
 		t.Errorf("status does not call a dead key a dead key:\n%s", out.String())
 	}
 }

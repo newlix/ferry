@@ -158,7 +158,7 @@ func (g *Gateway) handleUsage(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	start := time.Now()
 	if len(g.cfg.APIKeys) == 0 {
-		writeError(w, http.StatusServiceUnavailable, "gateway has no upstream API keys configured", u.anthropic)
+		writeError(w, http.StatusServiceUnavailable, "glms has no keys; add one: glms key add", u.anthropic)
 		return
 	}
 
@@ -214,12 +214,12 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 			return
 		}
 		copyForwardedHeaders(req.Header, r.Header)
-		setUpstreamAuth(req.Header, u, g.cfg.APIKeys[keyIdx])
+		setUpstreamAuth(req.Header, u, g.cfg.APIKeys[keyIdx].Secret)
 
 		resp, err = g.client.Do(req)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, fmt.Sprintf("upstream request failed: %v", err), u.anthropic)
-			g.log.Verbose.Printf("%s %s model=%s key=#%d status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, time.Since(start).Round(time.Millisecond), err)
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("could not reach z.ai: %v", err), u.anthropic)
+			g.log.Verbose.Printf("%s %s model=%s key=%s status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), g.cfg.APIKeys[keyIdx].Name, time.Since(start).Round(time.Millisecond), err)
 			return
 		}
 		// 401/403: key invalid or expired. 429: plan rate limit. These are the
@@ -230,7 +230,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 		reason := peekError(resp.Body)
 		resp.Body.Close()
 		next := order[(i+1)%len(order)]
-		g.log.Quiet.Printf("%s %s model=%s key=#%d status=%d, trying key #%d: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, resp.StatusCode, next+1, reason)
+		g.log.Quiet.Printf("%s %s model=%s key=%s status=%d, trying key %s: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), g.cfg.APIKeys[keyIdx].Name, resp.StatusCode, g.cfg.APIKeys[next].Name, reason)
 		// The cached quota data said this key had room; refetch it.
 		g.refreshUsageAsync()
 	}
@@ -249,9 +249,9 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	}
 	sessionLabel := ""
 	if sessionID != 0 {
-		sessionLabel = fmt.Sprintf(" session=%08x", sessionID)
+		sessionLabel = fmt.Sprintf(" conv=%08x", sessionID)
 	}
-	g.log.Verbose.Printf("%s %s model=%s key=#%d%s status=%d in=%dB out=%dB dur=%s", r.Method, r.URL.Path, modelLabel(requested, mapped), keyIdx+1, sessionLabel, resp.StatusCode, len(body), out.n, time.Since(start).Round(time.Millisecond))
+	g.log.Verbose.Printf("%s %s model=%s key=%s%s status=%d in=%dB out=%dB dur=%s", r.Method, r.URL.Path, modelLabel(requested, mapped), g.cfg.APIKeys[keyIdx].Name, sessionLabel, resp.StatusCode, len(body), out.n, time.Since(start).Round(time.Millisecond))
 }
 
 func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
