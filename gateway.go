@@ -156,20 +156,15 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 	u.RawQuery = r.URL.RawQuery
 
 	// Key order comes from quota data (see usageMonitor.candidateOrder):
-	// keys with weekly quota left first, soonest plan expiry first among
-	// them, most remaining first; exhausted or expired keys last. With no
-	// usage data at all (quota endpoint unreachable), the order rotates
-	// round-robin so load still spreads. A conversation with a stable message
-	// prefix sticks to its key while that key is still usable (prompt-cache
-	// friendly on multi-account setups); the failover loop below rebinds it.
-	// A retry happens only while nothing has been written to the client yet,
-	// which is always the case here: the response body is forwarded only
-	// after the loop picked the final response.
-	order := g.usage.candidateOrder(len(g.cfg.APIKeys), start)
-	if g.usage.allUnknown(len(g.cfg.APIKeys)) {
-		rot := int(g.nextKey.Add(1)-1) % len(order)
-		order = append(order[rot:], order[:rot]...)
-	}
+	// keys within 48h of plan expiry first, closest first (their credits
+	// vanish at expiry); otherwise the usable keys rotate round-robin so
+	// traffic spreads evenly; exhausted or expired keys last. A conversation
+	// with a stable message prefix sticks to its key while that key is still
+	// usable (prompt-cache friendly on multi-account setups); the failover
+	// loop below rebinds it. A retry happens only while nothing has been
+	// written to the client yet, which is always the case here: the response
+	// body is forwarded only after the loop picked the final response.
+	order := g.usage.candidateOrder(len(g.cfg.APIKeys), start, int(g.nextKey.Add(1))-1)
 	sessionID := uint64(0)
 	if len(g.cfg.APIKeys) > 1 {
 		sessionID = affinityID(obj, mapped)

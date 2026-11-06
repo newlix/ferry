@@ -16,7 +16,7 @@ opencode / Claude Code / any tool
         ▼
 glms (127.0.0.1:8787)
         │  Authorization: Bearer <coding-plan key>
-        │  key order: weekly quota left → soonest expiry → most remaining
+        │  key order: near-expiry keys first (≤48h), else round-robin; exhausted last
         │  one conversation → one key (sticky); 401/403/429 → next key + rebind
         ▼
 api.z.ai coding endpoints
@@ -111,12 +111,12 @@ files. `-listen` overrides `listen`.
   failover) glms reads each key's remaining 5-hour and weekly quota, plan
   name and renewal date from the console endpoints z.ai's own subscription
   UI uses (`/api/monitor/usage/quota/limit` and `/api/biz/subscription/list`,
-  undocumented but stable in practice). New conversations and failover try
-  keys in this order: keys with quota left first, soonest plan expiry first
-  (credits vanish at expiry, so spend them first), then most weekly
-  remaining; keys with unknown quota follow in config order; exhausted or
-  expired keys last. With no usage data at all, selection falls back to
-  round-robin. `curl http://127.0.0.1:8787/v1/usage` shows what glms sees.
+  undocumented but stable in practice). Normally the usable keys rotate
+  round-robin so traffic spreads evenly. A key within 48 hours of its plan
+  expiry jumps the queue, closest to expiry first — its remaining credits
+  vanish at expiry, so spend them down before then. Keys whose quota reads
+  empty, or whose expiry has passed, are tried last. `curl
+  http://127.0.0.1:8787/v1/usage` shows what glms sees.
 - Selection is sticky per conversation on top of that. The protocols carry
   no session identifier, so a conversation is identified by a hash of the
   model plus the first message of the request (the system prompt for coding

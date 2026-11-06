@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 )
@@ -18,17 +19,18 @@ type zaiUsageStub struct {
 	weekly   map[string]float64 // key -> remaining fraction
 	session  map[string]float64
 	plan     string
-	expiry   string
-	failKeys map[string]bool // keys whose quota fetch returns 500
+	expiry   map[string]string // key -> renewal date (2006-01-02)
+	failKeys map[string]bool   // keys whose quota fetch returns 500
 }
 
 func newZaiUsageStub(t *testing.T) *zaiUsageStub {
 	t.Helper()
+	defaultExpiry := time.Now().AddDate(0, 0, 30).Format("2006-01-02")
 	stub := &zaiUsageStub{
 		weekly:   map[string]float64{"k1": 0.8, "k2": 0.8},
 		session:  map[string]float64{"k1": 0.9, "k2": 0.9},
 		plan:     "GLM Coding Pro",
-		expiry:   time.Now().AddDate(0, 1, 0).Format("2006-01-02"),
+		expiry:   map[string]string{"k1": defaultExpiry, "k2": defaultExpiry},
 		failKeys: map[string]bool{},
 	}
 	mux := http.NewServeMux()
@@ -47,7 +49,7 @@ func newZaiUsageStub(t *testing.T) *zaiUsageStub {
 		]},"success":true}`, (1-sessionRem)*1000, (1-weeklyRem)*1000)
 	})
 	mux.HandleFunc("/api/biz/subscription/list", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"code":200,"data":[{"id":"1","productName":%q,"status":"VALID","valid":"2026-01-12 16:55:13-2026-02-12 16:55:13","nextRenewTime":%q,"billingCycle":"monthly","inCurrentPeriod":true}],"success":true}`, stub.plan, stub.expiry)
+		fmt.Fprintf(w, `{"code":200,"data":[{"id":"1","productName":%q,"status":"VALID","valid":"2026-01-12 16:55:13-2026-02-12 16:55:13","nextRenewTime":%q,"billingCycle":"monthly","inCurrentPeriod":true}],"success":true}`, stub.plan, stub.expiry[bearerKey(r)])
 	})
 	stub.server = httptest.NewServer(mux)
 	t.Cleanup(stub.server.Close)
@@ -89,8 +91,8 @@ func TestUsageFetchParsesConsoleShapes(t *testing.T) {
 		if u.planName != "GLM Coding Pro" {
 			t.Errorf("key %s: planName = %q, want GLM Coding Pro", k, u.planName)
 		}
-		if u.expiry.Format("2006-01-02") != stub.expiry {
-			t.Errorf("key %s: expiry = %v, want %s", k, u.expiry, stub.expiry)
+		if u.expiry.Format("2006-01-02") != stub.expiry[k] {
+			t.Errorf("key %s: expiry = %v, want %s", k, u.expiry, stub.expiry[k])
 		}
 	}
 }
@@ -113,35 +115,36 @@ func TestUsageFailedFetchFallsBackToUnknown(t *testing.T) {
 	}
 }
 
-func TestCandidateOrderQuotaAware(t *testing.T) {
+func TestCandidateOrderRampAndRotation(t *testing.T) {
 	m := newUsageMonitor("http://unused.example")
 	now := time.Now()
 	m.mu.Lock()
 	m.state = map[int]keyUsage{
-		0: {ok: true, weeklyRem: 0.9, sessionRem: 0.9, expiry: now.AddDate(0, 0, 60)},
-		1: {ok: true, weeklyRem: 0.9, sessionRem: 0.9, expiry: now.AddDate(0, 0, 3)},
-		2: {ok: true, weeklyRem: 0.2, sessionRem: 0.9, expiry: now.AddDate(0, 0, 30)},
-		3: {ok: true, weeklyRem: 0.5, sessionRem: 0.9, expiry: now.AddDate(0, 0, 30)},
-		4: {ok: true, weeklyRem: 0.7, sessionRem: 0.9, expiry: now.AddDate(0, 0, -1)}, // expired
-		5: {ok: true, weeklyRem: 0.0, sessionRem: 0.9},                                // weekly exhausted
-		6: {ok: true, weeklyRem: 0.7, sessionRem: 0.0},                                // session exhausted
+		0: {ok: true, weeklyRem: 0.9, sessionRem: 0.9, expiry: now.AddDate(0, 0, 30)},   // normal
+		1: {ok: true, weeklyRem: 0.5, sessionRem: 0.9, expiry: now.AddDate(0, 0, 60)},   // normal
+		3: {ok: true, weeklyRem: 0.8, sessionRem: 0.9, expiry: now.Add(36 * time.Hour)}, // ramping
+		4: {ok: true, weeklyRem: 0.8, sessionRem: 0.9, expiry: now.Add(12 * time.Hour)}, // ramping, closer
+		5: {ok: true, weeklyRem: 0.0, sessionRem: 0.9},                                  // weekly exhausted
+		6: {ok: true, weeklyRem: 0.7, sessionRem: 0.9, expiry: now.AddDate(0, 0, -1)},   // expired
+		7: {ok: true, weeklyRem: 0.9, sessionRem: 0.0},                                  // session exhausted
 	}
 	m.mu.Unlock()
-	// key 7 has no entry: unknown.
+	// key 2 has no entry: unknown, joins the normal rotation.
 
-	got := m.candidateOrder(8, now)
-	// Soonest expiry first (1); among equal expiry most weekly remaining
-	// (3 with 0.5 before 2 with 0.2); then 0. Unknown 7 next. Exhausted last,
-	// most weekly remaining first: expired 4 (0.7), session-out 6 (0.7, ties
-	// keep index order), weekly-out 5 (0.0).
-	want := []int{1, 3, 2, 0, 7, 4, 6, 5}
-	if len(got) != len(want) {
-		t.Fatalf("order = %v, want %v", got, want)
+	// Ramp keys first, closest expiry first; normal keys rotated (rot spreads
+	// the start position); exhausted last, most weekly remaining first (7 with
+	// 0.9, 6 with 0.7, 5 with 0.0).
+	got := m.candidateOrder(8, now, 0)
+	want := []int{4, 3, 0, 1, 2, 7, 6, 5}
+	if !slices.Equal(got, want) {
+		t.Fatalf("order rot=0 = %v, want %v", got, want)
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("order = %v, want %v", got, want)
-		}
+
+	// Far-from-expiry keys must NOT jump the queue; the rotation decides.
+	got = m.candidateOrder(8, now, 1)
+	want = []int{4, 3, 1, 2, 0, 7, 6, 5}
+	if !slices.Equal(got, want) {
+		t.Fatalf("order rot=1 = %v, want %v", got, want)
 	}
 }
 
@@ -218,6 +221,51 @@ func TestRoundRobinFallbackWhenUsageUnknown(t *testing.T) {
 	}
 }
 
+func TestProxyPrefersKeyAboutToExpire(t *testing.T) {
+	usageStub := newZaiUsageStub(t)
+	usageStub.expiry["k1"] = time.Now().AddDate(0, 0, 1).Format("2006-01-02") // tomorrow: inside the 48h ramp
+	upstream, seen := upstreamRecordingKeys(t, func(auth string, w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{}`))
+	})
+	srv, gw := newTestGateway(t, func(c *Config) {
+		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL, Usage: usageStub.server.URL}
+	})
+	gw.RefreshUsage()
+
+	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := expectAuth(t, seen); got != "Bearer k1" {
+		t.Fatalf("expiring key not preferred: %q, want Bearer k1", got)
+	}
+}
+
+func TestProxyAlternatesKeysWhenNoneIsRamping(t *testing.T) {
+	usageStub := newZaiUsageStub(t) // both keys expire in 30 days: no ramp
+	upstream, seen := upstreamRecordingKeys(t, func(auth string, w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{}`))
+	})
+	srv, gw := newTestGateway(t, func(c *Config) {
+		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL, Usage: usageStub.server.URL}
+	})
+	gw.RefreshUsage()
+
+	for _, want := range []string{"Bearer k1", "Bearer k2"} {
+		resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if got := expectAuth(t, seen); got != want {
+			t.Fatalf("even spread broken: got %q, want %q", got, want)
+		}
+	}
+}
+
 func TestUsageEndpoint(t *testing.T) {
 	usageStub := newZaiUsageStub(t)
 	srv, gw := newTestGateway(t, func(c *Config) {
@@ -250,8 +298,8 @@ func TestUsageEndpoint(t *testing.T) {
 		t.Fatalf("keys = %d, want 2", len(got.Keys))
 	}
 	first := got.Keys[0]
-	if first.Plan != "GLM Coding Pro" || first.Expires != usageStub.expiry {
-		t.Errorf("key 1 = %+v, want plan GLM Coding Pro expiring %s", first, usageStub.expiry)
+	if first.Plan != "GLM Coding Pro" || first.Expires != usageStub.expiry["k1"] {
+		t.Errorf("key 1 = %+v, want plan GLM Coding Pro expiring %s", first, usageStub.expiry["k1"])
 	}
 	if first.Weekly < 79 || first.Weekly > 81 {
 		t.Errorf("weekly = %.1f, want ~80", first.Weekly)

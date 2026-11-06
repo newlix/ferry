@@ -165,47 +165,47 @@ func (m *usageMonitor) getJSON(path, key string, out any) error {
 	return json.NewDecoder(io.LimitReader(resp.Body, usageMaxBody)).Decode(out)
 }
 
+// expiryRampWindow: a key within this much of its plan expiry jumps the
+// queue, closest to expiry first — its remaining credits vanish at expiry,
+// so burn them down before then. Outside the window keys are spread evenly
+// by round-robin (the rotation is applied by the caller).
+const expiryRampWindow = 48 * time.Hour
+
 // candidateOrder ranks keys for new conversations and failover:
 //
-//  1. keys with quota left, soonest plan expiry first (their credits vanish
-//     at expiry, so spend them first), then most weekly remaining;
-//  2. keys with unknown usage in config order;
+//  1. keys within expiryRampWindow of plan expiry, closest first;
+//  2. the remaining usable keys, rotated round-robin for even spread
+//     (unknown-quota keys belong here, in config order);
 //  3. exhausted or already expired keys, most weekly remaining first.
-func (m *usageMonitor) candidateOrder(n int, now time.Time) []int {
+func (m *usageMonitor) candidateOrder(n int, now time.Time, rot int) []int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	farFuture := time.Unix(1<<62, 0)
-	var usable, unknown, exhausted []int
+	var ramping, normal, exhausted []int
 	for i := range n {
 		u, ok := m.state[i]
 		switch {
 		case !ok:
-			unknown = append(unknown, i)
+			normal = append(normal, i)
 		case u.weeklyRem <= 0 || u.sessionRem <= 0 || (!u.expiry.IsZero() && !u.expiry.After(now)):
 			exhausted = append(exhausted, i)
+		case !u.expiry.IsZero() && u.expiry.Sub(now) <= expiryRampWindow:
+			ramping = append(ramping, i)
 		default:
-			usable = append(usable, i)
+			normal = append(normal, i)
 		}
 	}
-	sort.SliceStable(usable, func(a, b int) bool {
-		ua, ub := m.state[usable[a]], m.state[usable[b]]
-		ea, eb := ua.expiry, ub.expiry
-		if ea.IsZero() {
-			ea = farFuture
-		}
-		if eb.IsZero() {
-			eb = farFuture
-		}
-		if !ea.Equal(eb) {
-			return ea.Before(eb)
-		}
-		return ua.weeklyRem > ub.weeklyRem
+	sort.SliceStable(ramping, func(a, b int) bool {
+		return m.state[ramping[a]].expiry.Before(m.state[ramping[b]].expiry)
 	})
 	sort.SliceStable(exhausted, func(a, b int) bool {
 		return m.state[exhausted[a]].weeklyRem > m.state[exhausted[b]].weeklyRem
 	})
-	return slices.Concat(usable, unknown, exhausted)
+	if len(normal) > 1 {
+		rot %= len(normal)
+		normal = append(normal[rot:], normal[:rot]...)
+	}
+	return slices.Concat(ramping, normal, exhausted)
 }
 
 // usable reports whether key i should be tried at all: unknown keys are
@@ -215,14 +215,6 @@ func (m *usageMonitor) usable(i int) bool {
 	defer m.mu.Unlock()
 	u, ok := m.state[i]
 	return !ok || (u.weeklyRem > 0 && u.sessionRem > 0 && (u.expiry.IsZero() || u.expiry.After(time.Now())))
-}
-
-// allUnknown reports whether no key has usage data (quota endpoint
-// unreachable); then the caller falls back to round-robin rotation.
-func (m *usageMonitor) allUnknown(n int) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.state) == 0
 }
 
 type usageEntry struct {
