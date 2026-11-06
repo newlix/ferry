@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -40,6 +39,7 @@ type usageMonitor struct {
 
 	mu    sync.Mutex
 	state map[int]keyUsage // keyed by apiKeys index
+	cw    map[int]float64  // smooth weighted round-robin current weights
 }
 
 func newUsageMonitor(base string) *usageMonitor {
@@ -165,47 +165,92 @@ func (m *usageMonitor) getJSON(path, key string, out any) error {
 	return json.NewDecoder(io.LimitReader(resp.Body, usageMaxBody)).Decode(out)
 }
 
-// expiryRampWindow: a key within this much of its plan expiry jumps the
-// queue, closest to expiry first — its remaining credits vanish at expiry,
-// so burn them down before then. Outside the window keys are spread evenly
-// by round-robin (the rotation is applied by the caller).
-const expiryRampWindow = 48 * time.Hour
+// Key weights: equal weight spreads traffic evenly. A key within
+// expiryRampWindow of plan expiry gains weight linearly, up to +expiryMaxBoost
+// at expiry and scaled by its remaining weekly quota: traffic shifts toward
+// it gradually instead of all at once, so its per-key rate limits still share
+// the load with the other keys, and an almost-empty plan attracts little
+// extra traffic.
+const (
+	expiryRampWindow = 48 * time.Hour
+	expiryMaxBoost   = 3
+)
+
+func expiryBoost(u keyUsage, now time.Time) float64 {
+	if u.expiry.IsZero() {
+		return 0
+	}
+	left := u.expiry.Sub(now)
+	if left <= 0 || left >= expiryRampWindow {
+		return 0
+	}
+	return expiryMaxBoost * (1 - left.Seconds()/expiryRampWindow.Seconds()) * u.weeklyRem
+}
 
 // candidateOrder ranks keys for new conversations and failover:
 //
-//  1. keys within expiryRampWindow of plan expiry, closest first;
-//  2. the remaining usable keys, rotated round-robin for even spread
-//     (unknown-quota keys belong here, in config order);
+//  1. the usable key picked by smooth weighted round-robin (equal weights
+//     degenerate to plain round-robin);
+//  2. the remaining usable keys in config order;
 //  3. exhausted or already expired keys, most weekly remaining first.
-func (m *usageMonitor) candidateOrder(n int, now time.Time, rot int) []int {
+func (m *usageMonitor) candidateOrder(n int, now time.Time) []int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var ramping, normal, exhausted []int
+	var usable, exhausted []int
+	weights := make(map[int]float64, n)
 	for i := range n {
 		u, ok := m.state[i]
 		switch {
 		case !ok:
-			normal = append(normal, i)
+			usable = append(usable, i)
+			weights[i] = 1
 		case u.weeklyRem <= 0 || u.sessionRem <= 0 || (!u.expiry.IsZero() && !u.expiry.After(now)):
 			exhausted = append(exhausted, i)
-		case !u.expiry.IsZero() && u.expiry.Sub(now) <= expiryRampWindow:
-			ramping = append(ramping, i)
 		default:
-			normal = append(normal, i)
+			usable = append(usable, i)
+			weights[i] = 1 + expiryBoost(u, now)
 		}
 	}
-	sort.SliceStable(ramping, func(a, b int) bool {
-		return m.state[ramping[a]].expiry.Before(m.state[ramping[b]].expiry)
-	})
 	sort.SliceStable(exhausted, func(a, b int) bool {
 		return m.state[exhausted[a]].weeklyRem > m.state[exhausted[b]].weeklyRem
 	})
-	if len(normal) > 1 {
-		rot %= len(normal)
-		normal = append(normal[rot:], normal[:rot]...)
+	if len(usable) == 0 {
+		return exhausted
 	}
-	return slices.Concat(ramping, normal, exhausted)
+	first := m.pickWeighted(usable, weights)
+	order := make([]int, 0, n)
+	order = append(order, first)
+	for _, i := range usable {
+		if i != first {
+			order = append(order, i)
+		}
+	}
+	return append(order, exhausted...)
+}
+
+// pickWeighted advances the smooth weighted round-robin state (the nginx
+// algorithm: add each weight to its current weight, pick the max, subtract
+// the total weight from the winner) and returns the chosen index. Equal
+// weights rotate perfectly; unequal weights interleave without bursts, each
+// key keeping its share within one request of perfect proportion.
+func (m *usageMonitor) pickWeighted(usable []int, weights map[int]float64) int {
+	if m.cw == nil {
+		m.cw = map[int]float64{}
+	}
+	total := 0.0
+	for _, i := range usable {
+		total += weights[i]
+	}
+	best := -1
+	for _, i := range usable {
+		m.cw[i] += weights[i]
+		if best == -1 || m.cw[i] > m.cw[best] {
+			best = i
+		}
+	}
+	m.cw[best] -= total
+	return best
 }
 
 // usable reports whether key i should be tried at all: unknown keys are

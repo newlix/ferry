@@ -33,7 +33,6 @@ type route struct {
 type Gateway struct {
 	cfg        Config
 	client     *http.Client // no overall timeout: streams stay open as long as both sides do
-	nextKey    atomic.Uint64
 	sticky     stickySessions
 	usage      *usageMonitor
 	refreshing atomic.Bool
@@ -156,15 +155,16 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, rt route) {
 	u.RawQuery = r.URL.RawQuery
 
 	// Key order comes from quota data (see usageMonitor.candidateOrder):
-	// keys within 48h of plan expiry first, closest first (their credits
-	// vanish at expiry); otherwise the usable keys rotate round-robin so
-	// traffic spreads evenly; exhausted or expired keys last. A conversation
-	// with a stable message prefix sticks to its key while that key is still
-	// usable (prompt-cache friendly on multi-account setups); the failover
-	// loop below rebinds it. A retry happens only while nothing has been
-	// written to the client yet, which is always the case here: the response
-	// body is forwarded only after the loop picked the final response.
-	order := g.usage.candidateOrder(len(g.cfg.APIKeys), start, int(g.nextKey.Add(1))-1)
+	// smooth weighted round-robin over the usable keys — equal weights, so
+	// traffic spreads evenly, unless a key nears plan expiry and its weight
+	// ramps up gradually. Exhausted or expired keys are tried last. A
+	// conversation with a stable message prefix sticks to its key while that
+	// key is still usable (prompt-cache friendly on multi-account setups);
+	// the failover loop below rebinds it. A retry happens only while nothing
+	// has been written to the client yet, which is always the case here: the
+	// response body is forwarded only after the loop picked the final
+	// response.
+	order := g.usage.candidateOrder(len(g.cfg.APIKeys), start)
 	sessionID := uint64(0)
 	if len(g.cfg.APIKeys) > 1 {
 		sessionID = affinityID(obj, mapped)

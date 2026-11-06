@@ -16,7 +16,7 @@ opencode / Claude Code / any tool
         ▼
 glms (127.0.0.1:8787)
         │  Authorization: Bearer <coding-plan key>
-        │  key order: near-expiry keys first (≤48h), else round-robin; exhausted last
+        │  key order: smooth weighted round-robin; near-expiry keys gain weight (≤48h)
         │  one conversation → one key (sticky); 401/403/429 → next key + rebind
         ▼
 api.z.ai coding endpoints
@@ -107,16 +107,18 @@ files. `-listen` overrides `listen`.
 
 ## Behavior notes
 
-- Key selection is quota-aware. Every 5 minutes (and right after any 429
-  failover) glms reads each key's remaining 5-hour and weekly quota, plan
-  name and renewal date from the console endpoints z.ai's own subscription
-  UI uses (`/api/monitor/usage/quota/limit` and `/api/biz/subscription/list`,
-  undocumented but stable in practice). Normally the usable keys rotate
-  round-robin so traffic spreads evenly. A key within 48 hours of its plan
-  expiry jumps the queue, closest to expiry first — its remaining credits
-  vanish at expiry, so spend them down before then. Keys whose quota reads
-  empty, or whose expiry has passed, are tried last. `curl
-  http://127.0.0.1:8787/v1/usage` shows what glms sees.
+- Key selection is smooth weighted round-robin. Every 5 minutes (and right
+  after any 429 failover) glms reads each key's remaining 5-hour and weekly
+  quota, plan name and renewal date from the console endpoints z.ai's own
+  subscription UI uses (`/api/monitor/usage/quota/limit` and
+  `/api/biz/subscription/list`, undocumented but stable in practice).
+  Normally every usable key has equal weight, so traffic spreads evenly.
+  Within the last 48 hours before a plan's expiry its weight ramps up
+  linearly, up to +3× at expiry and scaled by its remaining weekly quota:
+  traffic shifts toward it gradually instead of all at once, and the other
+  keys keep their share, so one account's rate limits never become the
+  bottleneck. Keys whose quota reads empty, or whose expiry has passed, are
+  tried last. `curl http://127.0.0.1:8787/v1/usage` shows what glms sees.
 - Selection is sticky per conversation on top of that. The protocols carry
   no session identifier, so a conversation is identified by a hash of the
   model plus the first message of the request (the system prompt for coding

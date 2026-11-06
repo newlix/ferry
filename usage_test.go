@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"testing"
 	"time"
 )
@@ -115,36 +115,84 @@ func TestUsageFailedFetchFallsBackToUnknown(t *testing.T) {
 	}
 }
 
-func TestCandidateOrderRampAndRotation(t *testing.T) {
+func TestCandidateOrderWeightedSpread(t *testing.T) {
 	m := newUsageMonitor("http://unused.example")
 	now := time.Now()
 	m.mu.Lock()
 	m.state = map[int]keyUsage{
-		0: {ok: true, weeklyRem: 0.9, sessionRem: 0.9, expiry: now.AddDate(0, 0, 30)},   // normal
-		1: {ok: true, weeklyRem: 0.5, sessionRem: 0.9, expiry: now.AddDate(0, 0, 60)},   // normal
-		3: {ok: true, weeklyRem: 0.8, sessionRem: 0.9, expiry: now.Add(36 * time.Hour)}, // ramping
-		4: {ok: true, weeklyRem: 0.8, sessionRem: 0.9, expiry: now.Add(12 * time.Hour)}, // ramping, closer
-		5: {ok: true, weeklyRem: 0.0, sessionRem: 0.9},                                  // weekly exhausted
+		0: {ok: true, weeklyRem: 0.9, sessionRem: 0.9, expiry: now.AddDate(0, 0, 30)},   // weight 1
+		1: {ok: true, weeklyRem: 0.5, sessionRem: 0.9, expiry: now.AddDate(0, 0, 60)},   // weight 1
+		3: {ok: true, weeklyRem: 0.8, sessionRem: 0.9, expiry: now.Add(24 * time.Hour)}, // 1 + 3*0.5*0.8   = 2.2
+		4: {ok: true, weeklyRem: 0.8, sessionRem: 0.9, expiry: now.Add(6 * time.Hour)},  // 1 + 3*0.875*0.8 = 3.1
+		5: {ok: true, weeklyRem: 0.0, sessionRem: 0.9},                                  // exhausted
 		6: {ok: true, weeklyRem: 0.7, sessionRem: 0.9, expiry: now.AddDate(0, 0, -1)},   // expired
-		7: {ok: true, weeklyRem: 0.9, sessionRem: 0.0},                                  // session exhausted
+		7: {ok: true, weeklyRem: 0.9, sessionRem: 0.0},                                  // exhausted
 	}
 	m.mu.Unlock()
-	// key 2 has no entry: unknown, joins the normal rotation.
+	// key 2 unknown: weight 1. Total weight 8.3.
 
-	// Ramp keys first, closest expiry first; normal keys rotated (rot spreads
-	// the start position); exhausted last, most weekly remaining first (7 with
-	// 0.9, 6 with 0.7, 5 with 0.0).
-	got := m.candidateOrder(8, now, 0)
-	want := []int{4, 3, 0, 1, 2, 7, 6, 5}
-	if !slices.Equal(got, want) {
-		t.Fatalf("order rot=0 = %v, want %v", got, want)
+	const picks = 83
+	counts := map[int]int{}
+	for range picks {
+		order := m.candidateOrder(8, now)
+		first := order[0]
+		if first == 5 || first == 6 || first == 7 {
+			t.Fatalf("exhausted key #%d picked first: %v", first+1, order)
+		}
+		// Exhausted keys always at the tail, most weekly remaining first.
+		if order[5] != 7 || order[6] != 6 || order[7] != 5 {
+			t.Fatalf("exhausted tail = %v, want [7 6 5]", order[5:])
+		}
+		counts[first]++
 	}
 
-	// Far-from-expiry keys must NOT jump the queue; the rotation decides.
-	got = m.candidateOrder(8, now, 1)
-	want = []int{4, 3, 1, 2, 0, 7, 6, 5}
-	if !slices.Equal(got, want) {
-		t.Fatalf("order rot=1 = %v, want %v", got, want)
+	// Smooth WRR keeps each key within one request of its exact share.
+	wantShare := map[int]float64{0: 1, 1: 1, 2: 1, 3: 2.2, 4: 3.1}
+	for i, share := range wantShare {
+		ideal := share / 8.3 * picks
+		if math.Abs(float64(counts[i])-ideal) > 1.5 {
+			t.Errorf("key #%d picked %d times, want ~%.1f (weight %.1f)", i+1, counts[i], ideal, share)
+		}
+	}
+}
+
+func TestCandidateOrderEqualWeightsRotate(t *testing.T) {
+	m := newUsageMonitor("http://unused.example")
+	now := time.Now()
+	// No state at all: three keys, all weight 1, must rotate in order.
+	var got []int
+	for range 6 {
+		got = append(got, m.candidateOrder(3, now)[0])
+	}
+	want := []int{0, 1, 2, 0, 1, 2}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("rotation = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestExpiryBoost(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name string
+		u    keyUsage
+		want float64
+	}{
+		{"unknown expiry", keyUsage{ok: true, weeklyRem: 0.9}, 0},
+		{"far from expiry", keyUsage{ok: true, weeklyRem: 0.9, expiry: now.AddDate(0, 0, 30)}, 0},
+		{"already expired", keyUsage{ok: true, weeklyRem: 0.9, expiry: now.Add(-time.Hour)}, 0},
+		{"half the window, 80% weekly left", keyUsage{ok: true, weeklyRem: 0.8, expiry: now.Add(24 * time.Hour)}, 3 * 0.5 * 0.8},
+		{"at expiry, full weekly", keyUsage{ok: true, weeklyRem: 1, expiry: now.Add(time.Millisecond)}, 3},
+		{"at expiry, empty weekly", keyUsage{ok: true, weeklyRem: 0, expiry: now.Add(time.Millisecond)}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := expiryBoost(tt.u, now)
+			if math.Abs(got-tt.want) > 1e-6 {
+				t.Errorf("expiryBoost = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -221,7 +269,7 @@ func TestRoundRobinFallbackWhenUsageUnknown(t *testing.T) {
 	}
 }
 
-func TestProxyPrefersKeyAboutToExpire(t *testing.T) {
+func TestProxyShiftsTowardKeyAboutToExpire(t *testing.T) {
 	usageStub := newZaiUsageStub(t)
 	usageStub.expiry["k1"] = time.Now().AddDate(0, 0, 1).Format("2006-01-02") // tomorrow: inside the 48h ramp
 	upstream, seen := upstreamRecordingKeys(t, func(auth string, w http.ResponseWriter) {
@@ -233,13 +281,22 @@ func TestProxyPrefersKeyAboutToExpire(t *testing.T) {
 	})
 	gw.RefreshUsage()
 
-	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	counts := map[string]int{}
+	for range 30 {
+		resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		counts[expectAuth(t, seen)]++
 	}
-	if got := expectAuth(t, seen); got != "Bearer k1" {
-		t.Fatalf("expiring key not preferred: %q, want Bearer k1", got)
+	// The expiring key gets the larger share, but the other key keeps
+	// working: weight ramps up, it must not grab all the work.
+	if counts["Bearer k1"] <= counts["Bearer k2"] {
+		t.Errorf("expiring key did not get the larger share: %v", counts)
+	}
+	if counts["Bearer k2"] < 3 {
+		t.Errorf("other key starved (ramp grabbed all work): %v", counts)
 	}
 }
 
