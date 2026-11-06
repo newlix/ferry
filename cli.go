@@ -166,7 +166,16 @@ func cmdKeyList(store KeyStore) error {
 	return nil
 }
 
-func cmdInstall() error {
+func cmdInstall(store KeyStore) error {
+	names, err := store.Names()
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		// Installing keyless would bootstrap a service that exits and is
+		// restarted by KeepAlive forever.
+		return errors.New("no keys yet — add one first:  glms key add")
+	}
 	execPath, err := os.Executable()
 	if err != nil {
 		return err

@@ -20,7 +20,9 @@ func main() {
 }
 
 func dispatch(args []string) error {
-	if len(args) == 0 {
+	// Bare glms and glms with run flags (-v, -listen, -config) both run the
+	// gateway; only words select a verb.
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return cmdRun(args)
 	}
 	switch args[0] {
@@ -33,7 +35,7 @@ func dispatch(args []string) error {
 		}
 		return cmdStatus(cfg, NewKeyStore(configDir()), os.Stdout)
 	case "install":
-		return cmdInstall()
+		return cmdInstall(NewKeyStore(configDir()))
 	case "uninstall":
 		return cmdUninstall()
 	case "key":

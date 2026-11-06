@@ -70,6 +70,27 @@ func TestCmdStatus(t *testing.T) {
 	}
 }
 
+func TestCmdStatusInvalidKey(t *testing.T) {
+	stub := newZaiUsageStub(t)
+	stub.rejectKeys["k1"] = true
+	store := &fileStore{dir: t.TempDir()}
+	if err := store.Add("pro", "k1"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.Upstreams.Usage = stub.server.URL
+	cfg.Listen = "127.0.0.1:1"
+	pinServiceInstalled(t, false)
+
+	var out bytes.Buffer
+	if err := cmdStatus(cfg, store, &out); err != nil {
+		t.Fatalf("cmdStatus: %v", err)
+	}
+	if !strings.Contains(out.String(), "invalid key — remove it:  glms key remove pro") {
+		t.Errorf("status does not call a dead key a dead key:\n%s", out.String())
+	}
+}
+
 func TestCmdStatusNoKeys(t *testing.T) {
 	store := &fileStore{dir: t.TempDir()}
 	cfg := DefaultConfig()

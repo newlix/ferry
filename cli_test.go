@@ -85,6 +85,17 @@ func TestCmdKeyAddRefusesDuplicateName(t *testing.T) {
 	}
 }
 
+func TestCmdInstallRefusesWithoutKeys(t *testing.T) {
+	store := &fileStore{dir: t.TempDir()}
+	err := cmdInstall(store)
+	if err == nil {
+		t.Fatal("install without keys accepted, want refusal")
+	}
+	if !strings.Contains(err.Error(), "glms key add") {
+		t.Errorf("error = %v, want it to point at glms key add", err)
+	}
+}
+
 func TestPromptDefault(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader("myname\n"))
 	if got := promptDefault(r, &bytes.Buffer{}, "Name", "key1"); got != "myname" {

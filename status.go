@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -46,6 +47,11 @@ func cmdStatus(cfg Config, store KeyStore, out io.Writer) error {
 
 func renderKeyStatus(out io.Writer, name string, u keyUsage, err error) {
 	if err != nil {
+		var ce *consoleError
+		if errors.As(err, &ce) && (ce.code == 401 || ce.code == 403) {
+			fmt.Fprintf(out, "  %-14s invalid key — remove it:  glms key remove %s\n", name, name)
+			return
+		}
 		fmt.Fprintf(out, "  %-14s unreachable: %v\n", name, err)
 		return
 	}
