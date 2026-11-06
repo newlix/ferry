@@ -11,29 +11,31 @@ import (
 	"time"
 )
 
-// zaiUsageStub serves the two undocumented console endpoints with the
-// response shapes z.ai's own subscription UI uses. weekly/session remaining
-// per key are given as consumed fractions.
+// zaiUsageStub serves the two console endpoints with the response shapes the
+// live API returns (verified 2026-11-07): credit windows carry unit (3 =
+// session, 6 = weekly) and nextResetTime in epoch milliseconds, and a bad
+// key gets HTTP 200 with {"code":401,...}.
 type zaiUsageStub struct {
-	server     *httptest.Server
-	weekly     map[string]float64 // key -> remaining fraction
-	session    map[string]float64
-	plan       string
-	expiry     map[string]string // key -> renewal date (2006-01-02)
-	failKeys   map[string]bool   // keys whose quota fetch returns 500
-	rejectKeys map[string]bool   // keys whose quota fetch returns 401
+	server       *httptest.Server
+	weekly       map[string]float64 // key -> remaining fraction
+	session      map[string]float64
+	weeklyReset  map[string]time.Duration // key -> time until the weekly window resets
+	sessionReset map[string]time.Duration
+	plan         string
+	failKeys     map[string]bool // keys whose quota fetch returns 500
+	rejectKeys   map[string]bool // keys whose quota fetch returns the 401 envelope
 }
 
 func newZaiUsageStub(t *testing.T) *zaiUsageStub {
 	t.Helper()
-	defaultExpiry := time.Now().AddDate(0, 0, 30).Format("2006-01-02")
 	stub := &zaiUsageStub{
-		weekly:     map[string]float64{"k1": 0.8, "k2": 0.8},
-		session:    map[string]float64{"k1": 0.9, "k2": 0.9},
-		plan:       "GLM Coding Pro",
-		expiry:     map[string]string{"k1": defaultExpiry, "k2": defaultExpiry},
-		failKeys:   map[string]bool{},
-		rejectKeys: map[string]bool{},
+		weekly:       map[string]float64{"k1": 0.8, "k2": 0.8},
+		session:      map[string]float64{"k1": 0.9, "k2": 0.9},
+		weeklyReset:  map[string]time.Duration{"k1": 5 * 24 * time.Hour, "k2": 5 * 24 * time.Hour},
+		sessionReset: map[string]time.Duration{"k1": 2 * time.Hour, "k2": 2 * time.Hour},
+		plan:         "GLM Coding Pro",
+		failKeys:     map[string]bool{},
+		rejectKeys:   map[string]bool{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/monitor/usage/quota/limit", func(w http.ResponseWriter, r *http.Request) {
@@ -43,8 +45,6 @@ func newZaiUsageStub(t *testing.T) *zaiUsageStub {
 			return
 		}
 		if stub.rejectKeys[key] {
-			// The real console API rejects a bad key with HTTP 200 and an
-			// error envelope (verified 2026-11-07 against api.z.ai).
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"code":401,"msg":"token expired or incorrect","success":false}`)
 			return
@@ -52,13 +52,14 @@ func newZaiUsageStub(t *testing.T) *zaiUsageStub {
 		// usage 1000, currentValue derived from the remaining fractions.
 		weeklyRem, sessionRem := stub.weekly[key], stub.session[key]
 		fmt.Fprintf(w, `{"code":200,"data":{"limits":[
-			{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":1000,"currentValue":%.0f},
-			{"type":"TOKENS_LIMIT","unit":6,"number":7,"usage":1000,"currentValue":%.0f},
-			{"type":"TIME_LIMIT","unit":5,"number":30,"usage":4000,"currentValue":300}
-		]},"success":true}`, (1-sessionRem)*1000, (1-weeklyRem)*1000)
+			{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":1000,"currentValue":%.0f,"nextResetTime":%d},
+			{"type":"CREDIT_LIMIT","unit":6,"number":1,"usage":1000,"currentValue":%.0f,"nextResetTime":%d}
+		]},"success":true}`,
+			(1-sessionRem)*1000, time.Now().Add(stub.sessionReset[key]).UnixMilli(),
+			(1-weeklyRem)*1000, time.Now().Add(stub.weeklyReset[key]).UnixMilli())
 	})
 	mux.HandleFunc("/api/biz/subscription/list", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"code":200,"data":[{"id":"1","productName":%q,"status":"VALID","valid":"2026-01-12 16:55:13-2026-02-12 16:55:13","nextRenewTime":%q,"billingCycle":"monthly","inCurrentPeriod":true}],"success":true}`, stub.plan, stub.expiry[bearerKey(r)])
+		fmt.Fprintf(w, `{"code":200,"data":[{"id":"1","productName":%q,"status":"VALID"}],"success":true}`, stub.plan)
 	})
 	stub.server = httptest.NewServer(mux)
 	t.Cleanup(stub.server.Close)
@@ -100,8 +101,11 @@ func TestUsageFetchParsesConsoleShapes(t *testing.T) {
 		if u.planName != "GLM Coding Pro" {
 			t.Errorf("key %s: planName = %q, want GLM Coding Pro", k, u.planName)
 		}
-		if u.expiry.Format("2006-01-02") != stub.expiry[k] {
-			t.Errorf("key %s: expiry = %v, want %s", k, u.expiry, stub.expiry[k])
+		if left := time.Until(u.weeklyReset); left < 4*24*time.Hour || left > 5*24*time.Hour+time.Minute {
+			t.Errorf("key %s: weeklyReset in %v, want ~5d", k, left)
+		}
+		if left := time.Until(u.sessionReset); left < time.Hour || left > 2*time.Hour+time.Minute {
+			t.Errorf("key %s: sessionReset in %v, want ~2h", k, left)
 		}
 	}
 }
@@ -129,13 +133,13 @@ func TestCandidateOrderWeightedSpread(t *testing.T) {
 	now := time.Now()
 	m.mu.Lock()
 	m.state = map[int]keyUsage{
-		0: {ok: true, weeklyRem: 0.9, sessionRem: 0.9, expiry: now.AddDate(0, 0, 30)},   // weight 1
-		1: {ok: true, weeklyRem: 0.5, sessionRem: 0.9, expiry: now.AddDate(0, 0, 60)},   // weight 1
-		3: {ok: true, weeklyRem: 0.8, sessionRem: 0.9, expiry: now.Add(24 * time.Hour)}, // 1 + 3*0.5*0.8   = 2.2
-		4: {ok: true, weeklyRem: 0.8, sessionRem: 0.9, expiry: now.Add(6 * time.Hour)},  // 1 + 3*0.875*0.8 = 3.1
-		5: {ok: true, weeklyRem: 0.0, sessionRem: 0.9},                                  // exhausted
-		6: {ok: true, weeklyRem: 0.7, sessionRem: 0.9, expiry: now.AddDate(0, 0, -1)},   // expired
-		7: {ok: true, weeklyRem: 0.9, sessionRem: 0.0},                                  // exhausted
+		0: {ok: true, weeklyRem: 0.9, sessionRem: 0.9, weeklyReset: now.Add(5 * 24 * time.Hour)}, // weight 1
+		1: {ok: true, weeklyRem: 0.5, sessionRem: 0.9, weeklyReset: now.Add(6 * 24 * time.Hour)}, // weight 1
+		3: {ok: true, weeklyRem: 0.8, sessionRem: 0.9, weeklyReset: now.Add(24 * time.Hour)},     // 1 + 3*0.5*0.8   = 2.2
+		4: {ok: true, weeklyRem: 0.8, sessionRem: 0.9, weeklyReset: now.Add(6 * time.Hour)},      // 1 + 3*0.875*0.8 = 3.1
+		5: {ok: true, weeklyRem: 0.0, sessionRem: 0.9},                                           // exhausted
+		6: {ok: true, weeklyRem: 0.7, sessionRem: 0.9, weeklyReset: now.Add(-time.Hour)},         // reset already passed: still usable, no boost
+		7: {ok: true, weeklyRem: 0.9, sessionRem: 0.0},                                           // exhausted
 	}
 	m.mu.Unlock()
 	// key 2 unknown: weight 1. Total weight 8.3.
@@ -145,20 +149,22 @@ func TestCandidateOrderWeightedSpread(t *testing.T) {
 	for range picks {
 		order := m.candidateOrder(8, now)
 		first := order[0]
-		if first == 5 || first == 6 || first == 7 {
+		if first == 5 || first == 7 {
 			t.Fatalf("exhausted key #%d picked first: %v", first+1, order)
 		}
 		// Exhausted keys always at the tail, most weekly remaining first.
-		if order[5] != 7 || order[6] != 6 || order[7] != 5 {
-			t.Fatalf("exhausted tail = %v, want [7 6 5]", order[5:])
+		if order[6] != 7 || order[7] != 5 {
+			t.Fatalf("exhausted tail = %v, want [7 5]", order[6:])
 		}
 		counts[first]++
 	}
 
-	// Smooth WRR keeps each key within one request of its exact share.
-	wantShare := map[int]float64{0: 1, 1: 1, 2: 1, 3: 2.2, 4: 3.1}
+	// Smooth WRR keeps each key within one request of its exact share; a
+	// passed reset time refills rather than demotes, so key 6 is back to
+	// weight 1.
+	wantShare := map[int]float64{0: 1, 1: 1, 2: 1, 3: 2.2, 4: 3.1, 6: 1}
 	for i, share := range wantShare {
-		ideal := share / 8.3 * picks
+		ideal := share / 9.3 * picks
 		if math.Abs(float64(counts[i])-ideal) > 1.5 {
 			t.Errorf("key #%d picked %d times, want ~%.1f (weight %.1f)", i+1, counts[i], ideal, share)
 		}
@@ -181,25 +187,25 @@ func TestCandidateOrderEqualWeightsRotate(t *testing.T) {
 	}
 }
 
-func TestExpiryBoost(t *testing.T) {
+func TestResetBoost(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
 		name string
 		u    keyUsage
 		want float64
 	}{
-		{"unknown expiry", keyUsage{ok: true, weeklyRem: 0.9}, 0},
-		{"far from expiry", keyUsage{ok: true, weeklyRem: 0.9, expiry: now.AddDate(0, 0, 30)}, 0},
-		{"already expired", keyUsage{ok: true, weeklyRem: 0.9, expiry: now.Add(-time.Hour)}, 0},
-		{"half the window, 80% weekly left", keyUsage{ok: true, weeklyRem: 0.8, expiry: now.Add(24 * time.Hour)}, 3 * 0.5 * 0.8},
-		{"at expiry, full weekly", keyUsage{ok: true, weeklyRem: 1, expiry: now.Add(time.Millisecond)}, 3},
-		{"at expiry, empty weekly", keyUsage{ok: true, weeklyRem: 0, expiry: now.Add(time.Millisecond)}, 0},
+		{"unknown reset", keyUsage{ok: true, weeklyRem: 0.9}, 0},
+		{"far from reset", keyUsage{ok: true, weeklyRem: 0.9, weeklyReset: now.Add(5 * 24 * time.Hour)}, 0},
+		{"reset already passed", keyUsage{ok: true, weeklyRem: 0.9, weeklyReset: now.Add(-time.Hour)}, 0},
+		{"half the window, 80% weekly left", keyUsage{ok: true, weeklyRem: 0.8, weeklyReset: now.Add(24 * time.Hour)}, 3 * 0.5 * 0.8},
+		{"at reset, full weekly", keyUsage{ok: true, weeklyRem: 1, weeklyReset: now.Add(time.Millisecond)}, 3},
+		{"at reset, empty weekly", keyUsage{ok: true, weeklyRem: 0, weeklyReset: now.Add(time.Millisecond)}, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := expiryBoost(tt.u, now)
+			got := resetBoost(tt.u, now)
 			if math.Abs(got-tt.want) > 1e-6 {
-				t.Errorf("expiryBoost = %v, want %v", got, tt.want)
+				t.Errorf("resetBoost = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -280,7 +286,7 @@ func TestRoundRobinFallbackWhenUsageUnknown(t *testing.T) {
 
 func TestProxyShiftsTowardKeyAboutToExpire(t *testing.T) {
 	usageStub := newZaiUsageStub(t)
-	usageStub.expiry["k1"] = time.Now().AddDate(0, 0, 1).Format("2006-01-02") // tomorrow: inside the 48h ramp
+	usageStub.weeklyReset["k1"] = 24 * time.Hour // inside the 48h ramp
 	upstream, seen := upstreamRecordingKeys(t, func(auth string, w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{}`))
@@ -299,10 +305,11 @@ func TestProxyShiftsTowardKeyAboutToExpire(t *testing.T) {
 		}
 		counts[expectAuth(t, seen)]++
 	}
-	// The expiring key gets the larger share, but the other key keeps
-	// working: weight ramps up, it must not grab all the work.
+	// The key about to lose its leftover weekly quota gets the larger share,
+	// but the other key keeps working: weight ramps up, it must not grab all
+	// the work.
 	if counts["Bearer k1"] <= counts["Bearer k2"] {
-		t.Errorf("expiring key did not get the larger share: %v", counts)
+		t.Errorf("soon-resetting key did not get the larger share: %v", counts)
 	}
 	if counts["Bearer k2"] < 3 {
 		t.Errorf("other key starved (ramp grabbed all work): %v", counts)
@@ -310,7 +317,7 @@ func TestProxyShiftsTowardKeyAboutToExpire(t *testing.T) {
 }
 
 func TestProxyAlternatesKeysWhenNoneIsRamping(t *testing.T) {
-	usageStub := newZaiUsageStub(t) // both keys expire in 30 days: no ramp
+	usageStub := newZaiUsageStub(t) // both windows reset in days: no ramp
 	upstream, seen := upstreamRecordingKeys(t, func(auth string, w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{}`))
@@ -350,11 +357,12 @@ func TestUsageEndpoint(t *testing.T) {
 	}
 	var got struct {
 		Keys []struct {
-			Key     int     `json:"key"`
-			Plan    string  `json:"plan"`
-			Weekly  float64 `json:"weeklyRemainingPercent"`
-			Session float64 `json:"sessionRemainingPercent"`
-			Expires string  `json:"expires"`
+			Key             int     `json:"key"`
+			Plan            string  `json:"plan"`
+			Weekly          float64 `json:"weeklyRemainingPercent"`
+			Session         float64 `json:"sessionRemainingPercent"`
+			WeekResetsAt    string  `json:"weekResetsAt"`
+			SessionResetsAt string  `json:"sessionResetsAt"`
 		} `json:"keys"`
 	}
 	if err := json.Unmarshal(body, &got); err != nil {
@@ -364,10 +372,16 @@ func TestUsageEndpoint(t *testing.T) {
 		t.Fatalf("keys = %d, want 2", len(got.Keys))
 	}
 	first := got.Keys[0]
-	if first.Plan != "GLM Coding Pro" || first.Expires != usageStub.expiry["k1"] {
-		t.Errorf("key 1 = %+v, want plan GLM Coding Pro expiring %s", first, usageStub.expiry["k1"])
+	if first.Plan != "GLM Coding Pro" {
+		t.Errorf("key 1 = %+v, want plan GLM Coding Pro", first)
 	}
 	if first.Weekly < 79 || first.Weekly > 81 {
 		t.Errorf("weekly = %.1f, want ~80", first.Weekly)
+	}
+	if reset, err := time.Parse(time.RFC3339, first.WeekResetsAt); err != nil || time.Until(reset) < 4*24*time.Hour {
+		t.Errorf("weekResetsAt = %q (%v), want an RFC3339 time ~5d out", first.WeekResetsAt, err)
+	}
+	if first.SessionResetsAt == "" {
+		t.Error("sessionResetsAt empty, want a time")
 	}
 }

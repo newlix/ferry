@@ -15,7 +15,7 @@ opencode / Claude Code / any tool
         ▼
 glms (127.0.0.1:8787)
         │  Authorization: Bearer <coding-plan key>
-        │  key order: smooth weighted round-robin; near-expiry keys gain weight (≤48h)
+        │  key order: smooth weighted round-robin; keys about to lose unused weekly quota gain weight
         │  one conversation → one key (sticky); 401/403/429 → next key + rebind
         ▼
 api.z.ai coding endpoints
@@ -99,16 +99,16 @@ Keys live in the Keychain, never in this file; a config that still carries
 
 - Key selection is smooth weighted round-robin. Every 5 minutes (and right
   after any 429 failover) glms reads each key's remaining 5-hour and weekly
-  quota, plan name and renewal date from the console endpoints z.ai's own
+  quota, reset times and plan name from the console endpoints z.ai's own
   subscription UI uses (`/api/monitor/usage/quota/limit` and
   `/api/biz/subscription/list`, undocumented but stable in practice).
   Normally every usable key has equal weight, so traffic spreads evenly.
-  Within the last 48 hours before a plan's expiry its weight ramps up
-  linearly, up to +3× at expiry and scaled by its remaining weekly quota:
-  traffic shifts toward it gradually instead of all at once, and the other
-  keys keep their share, so one account's rate limits never become the
-  bottleneck. Keys whose quota reads empty, or whose expiry has passed, are
-  tried last.
+  When a key's weekly window resets within 48 hours its weight ramps up
+  linearly, up to +3× at the reset and scaled by the remaining weekly quota:
+  unused weekly credits do not roll over, so they are burned down before the
+  reset — gradually, so the other keys keep their share and no account's
+  rate limits become the bottleneck. Keys whose quota reads empty are tried
+  last; a passed reset time refills the window instead of demoting it.
 - Selection is sticky per conversation on top of that. The protocols carry
   no session identifier, so a conversation is identified by a hash of the
   model plus the first message of the request (the system prompt for coding

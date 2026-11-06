@@ -55,8 +55,28 @@ func renderKeyStatus(out io.Writer, name string, u keyUsage, err error) {
 		fmt.Fprintf(out, "  %-14s unreachable: %v\n", name, err)
 		return
 	}
-	fmt.Fprintf(out, "  %-14s %-18s %s %3.0f%% left this week, %3.0f%% this session, %s\n",
-		name, planLabel(u), bar(u.weeklyRem), u.weeklyRem*100, u.sessionRem*100, expiryLabel(u.expiry))
+	fmt.Fprintf(out, "  %-14s %-18s %s %3.0f%% left this week, resets in %s · session %3.0f%%, resets in %s\n",
+		name, planLabel(u), bar(u.weeklyRem), u.weeklyRem*100, relTime(time.Until(u.weeklyReset)), u.sessionRem*100, relTime(time.Until(u.sessionReset)))
+}
+
+// relTime renders a countdown compactly: "2h 5m", "1d 8h". Negative or zero
+// durations mean "about now".
+func relTime(d time.Duration) string {
+	if d <= 0 {
+		return "0m"
+	}
+	switch {
+	case d < time.Minute:
+		return "<1m"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		return fmt.Sprintf("%dh %dm", h, int(d.Minutes())-h*60)
+	default:
+		days := int(d.Hours() / 24)
+		return fmt.Sprintf("%dd %dh", days, int(d.Hours())-days*24)
+	}
 }
 
 func planLabel(u keyUsage) string {
@@ -64,13 +84,6 @@ func planLabel(u keyUsage) string {
 		return "unknown plan"
 	}
 	return u.planName
-}
-
-func expiryLabel(t time.Time) string {
-	if t.IsZero() {
-		return "no expiry date"
-	}
-	return "expires " + t.Format("2006-01-02")
 }
 
 func bar(frac float64) string {

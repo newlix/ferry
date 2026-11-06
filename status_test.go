@@ -27,10 +27,13 @@ func TestBar(t *testing.T) {
 
 func TestRenderKeyStatus(t *testing.T) {
 	var out bytes.Buffer
-	u := keyUsage{ok: true, planName: "GLM Coding Pro", weeklyRem: 0.8, sessionRem: 0.9, expiry: time.Date(2026, 12, 7, 0, 0, 0, 0, time.UTC)}
+	// The 30-minute margins keep the rounded countdowns stable while the
+	// test runs.
+	u := keyUsage{ok: true, planName: "GLM Coding Pro", weeklyRem: 0.8, sessionRem: 0.9,
+		weeklyReset: time.Now().Add(60*time.Hour + 30*time.Minute), sessionReset: time.Now().Add(3*time.Hour + 30*time.Minute)}
 	renderKeyStatus(&out, "pro", u, nil)
 	got := out.String()
-	for _, want := range []string{"pro", "GLM Coding Pro", "[========··]", "80% left this week", "90% this session", "expires 2026-12-07"} {
+	for _, want := range []string{"pro", "GLM Coding Pro", "[========··]", "80% left this week, resets in 2d 12h", "session  90%, resets in 3h 29m"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("status line missing %q: %s", want, got)
 		}
@@ -63,7 +66,7 @@ func TestCmdStatus(t *testing.T) {
 		t.Fatalf("cmdStatus: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"not running", "GLM Coding Pro", "80% left this week", "expires"} {
+	for _, want := range []string{"not running", "GLM Coding Pro", "80% left this week", "resets in"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("status output missing %q:\n%s", want, got)
 		}

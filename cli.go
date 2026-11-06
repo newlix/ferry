@@ -125,7 +125,7 @@ func cmdKeyAdd(cfg Config, store KeyStore, in io.Reader, out io.Writer) error {
 	var ce *consoleError
 	switch {
 	case verr == nil:
-		fmt.Fprintf(out, "Verified: %s, weekly %.0f%% left, expires %s.\n", planLabel(u), u.weeklyRem*100, usageExpiryLabel(u.expiry))
+		fmt.Fprintf(out, "Verified: %s, weekly %.0f%% left (resets in %s).\n", planLabel(u), u.weeklyRem*100, relTime(time.Until(u.weeklyReset)))
 	case errors.As(verr, &ce) && (ce.code == 401 || ce.code == 403):
 		return fmt.Errorf("z.ai rejected this key (%s) — nothing saved", ce.msg)
 	default:
@@ -195,8 +195,10 @@ func cmdInstall(store KeyStore) error {
 		return err
 	}
 	uid := strconv.Itoa(os.Getuid())
-	exec.Command(launchctlBin, "bootout", "gui/"+uid+"/"+serviceLabel).Run() // not installed yet: ignore
-	if out, err := exec.Command(launchctlBin, "bootstrap", "gui/"+uid, plist).CombinedOutput(); err != nil {
+	domain := "gui/" + uid
+	exec.Command(launchctlBin, "bootout", domain+"/"+serviceLabel).Run()
+	waitServiceGone(domain, 3*time.Second)
+	if out, err := exec.Command(launchctlBin, "bootstrap", domain, plist).CombinedOutput(); err != nil {
 		return fmt.Errorf("launchctl bootstrap: %v: %s", err, out)
 	}
 	time.Sleep(500 * time.Millisecond)
@@ -220,6 +222,19 @@ func cmdUninstall() error {
 	}
 	fmt.Println("Removed the LaunchAgent.")
 	return nil
+}
+
+// waitServiceGone blocks until launchd no longer knows the service: bootout
+// is asynchronous, and bootstrapping while the old instance is still tearing
+// down fails with "Input/output error".
+func waitServiceGone(domain string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := exec.Command(launchctlBin, "print", domain+"/"+serviceLabel).Run(); err != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // restartServiceIfInstalled applies key changes without making the user
