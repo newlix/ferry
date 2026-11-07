@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"net"
+	"os"
 	"strings"
 	"testing"
 )
@@ -124,9 +125,27 @@ func TestDefaultKeyName(t *testing.T) {
 
 func TestReadSecretPlain(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader("sk-abc\n"))
-	got, err := readSecret(r, false)
+	got, err := readSecret(r, nil)
 	if err != nil || got != "sk-abc" {
 		t.Errorf("readSecret = %q, %v; want sk-abc", got, err)
+	}
+}
+
+// Pins the fix that the hidden path forwards its stdin to bash: exec without
+// Stdin reads /dev/null and the key came back empty (observed 2026-11). bash
+// read -s on a pipe reads plainly, so a pipe stands in for the terminal.
+func TestReadSecretHiddenForwardsStdin(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pw.WriteString("sk-abc\n"); err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	got, err := readSecret(bufio.NewReader(pr), pr)
+	if err != nil || got != "sk-abc" {
+		t.Errorf("readSecret hidden = %q, %v; want sk-abc", got, err)
 	}
 }
 

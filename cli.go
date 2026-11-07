@@ -101,7 +101,7 @@ func cmdKeyAdd(cfg Config, store KeyStore, in io.Reader, out io.Writer, suggestI
 	}
 	reader := bufio.NewReader(in)
 	fmt.Fprintln(out, "Paste your GLM Coding Plan key (hidden while typing).")
-	secret, err := readSecret(reader, isTerminalReader(in))
+	secret, err := readSecret(reader, terminalReader(in))
 	if err != nil {
 		return err
 	}
@@ -301,11 +301,14 @@ func isTerminal(f *os.File) bool {
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
-// isTerminalReader hides typed input only when the reader itself is the
-// terminal; piped input (tests, scripts) reads plainly.
-func isTerminalReader(in io.Reader) bool {
+// terminalReader returns in as a file when it is an interactive terminal,
+// else nil.
+func terminalReader(in io.Reader) *os.File {
 	f, ok := in.(*os.File)
-	return ok && isTerminal(f)
+	if !ok || !isTerminal(f) {
+		return nil
+	}
+	return f
 }
 
 func promptDefault(r *bufio.Reader, out io.Writer, label, def string) string {
@@ -320,11 +323,15 @@ func promptDefault(r *bufio.Reader, out io.Writer, label, def string) string {
 	return def
 }
 
-// readSecret hides the typed key on a terminal via bash read -s, the one
-// stdlib-only way to disable echo; piped input (tests, scripts) reads plainly.
-func readSecret(r *bufio.Reader, hidden bool) (string, error) {
-	if hidden {
-		out, err := exec.Command("/bin/bash", "-c", `read -s -r -p "API key: " k; printf '\n'; printf '%s' "$k"`).Output()
+// readSecret hides the typed key when hiddenFrom is a terminal: bash read -s
+// is the one stdlib-only way to disable echo. The terminal itself must be the
+// bash process's stdin: exec without Stdin reads /dev/null, which ends the
+// read at once with an empty key. Piped input (tests, scripts) reads plainly.
+func readSecret(r *bufio.Reader, hiddenFrom *os.File) (string, error) {
+	if hiddenFrom != nil {
+		cmd := exec.Command("/bin/bash", "-c", `read -s -r -p "API key: " k; printf '\n'; printf '%s' "$k"`)
+		cmd.Stdin = hiddenFrom
+		out, err := cmd.Output()
 		if err != nil {
 			return "", fmt.Errorf("read key: %w", err)
 		}
