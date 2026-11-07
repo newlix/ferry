@@ -25,13 +25,11 @@ const (
 )
 
 type keyUsage struct {
-	ok           bool
 	planName     string
 	sessionRem   float64 // remaining fraction 0..1; 1 when the window is absent
 	weeklyRem    float64
 	sessionReset time.Time // zero = unknown
 	weeklyReset  time.Time
-	fetchedAt    time.Time
 }
 
 type usageMonitor struct {
@@ -73,7 +71,7 @@ func (m *usageMonitor) refresh(keys []apiKey) {
 }
 
 func (m *usageMonitor) fetchKey(key string) (keyUsage, error) {
-	u := keyUsage{ok: true, sessionRem: 1, weeklyRem: 1, fetchedAt: time.Now()}
+	u := keyUsage{sessionRem: 1, weeklyRem: 1}
 	if err := m.fetchQuota(key, &u); err != nil {
 		return keyUsage{}, err
 	}

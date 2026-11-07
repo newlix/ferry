@@ -16,7 +16,7 @@ func TestRenderKeyStatus(t *testing.T) {
 
 	// The 30-minute margins keep the rounded countdowns stable while the
 	// test runs.
-	healthy := keyUsage{ok: true, planName: "GLM Coding Max", weeklyRem: 0.8, sessionRem: 0.9,
+	healthy := keyUsage{planName: "GLM Coding Max", weeklyRem: 0.8, sessionRem: 0.9,
 		weeklyReset: time.Now().Add(60*time.Hour + 30*time.Minute), sessionReset: time.Now().Add(3*time.Hour + 30*time.Minute)}
 	got := render(healthy)
 	for _, want := range []string{"Max", "80% this week", "· resets in 2d 12h"} {

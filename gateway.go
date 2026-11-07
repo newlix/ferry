@@ -89,8 +89,8 @@ func NewGateway(cfg Config, log Logger) *Gateway {
 	return g
 }
 
-// RefreshUsage synchronously refetches quota data for all keys.
-func (g *Gateway) RefreshUsage() {
+// refreshUsage synchronously refetches quota data for all keys.
+func (g *Gateway) refreshUsage() {
 	g.usage.refresh(g.cfg.APIKeys)
 }
 

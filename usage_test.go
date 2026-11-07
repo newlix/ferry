@@ -87,9 +87,6 @@ func TestUsageFetchParsesConsoleShapes(t *testing.T) {
 
 	for _, k := range []string{"k1", "k2"} {
 		u := got[k]
-		if !u.ok {
-			t.Fatalf("key %s: fetch failed", k)
-		}
 		if u.weeklyRem < 0.79 || u.weeklyRem > 0.81 {
 			t.Errorf("key %s: weeklyRem = %.3f, want ~0.80", k, u.weeklyRem)
 		}
@@ -121,8 +118,8 @@ func TestUsageFailedFetchFallsBackToUnknown(t *testing.T) {
 	if k1Known {
 		t.Error("failed key kept usage state, want unknown")
 	}
-	if !k2.ok {
-		t.Error("healthy key lost usage state")
+	if k2.weeklyRem < 0.79 || k2.weeklyRem > 0.81 {
+		t.Errorf("healthy key: weeklyRem = %.3f, want ~0.80", k2.weeklyRem)
 	}
 }
 
@@ -131,13 +128,13 @@ func TestCandidateOrderWeightedSpread(t *testing.T) {
 	now := time.Now()
 	m.mu.Lock()
 	m.state = map[int]keyUsage{
-		0: {ok: true, weeklyRem: 0.9, sessionRem: 0.9, weeklyReset: now.Add(5 * 24 * time.Hour)}, // weight 1
-		1: {ok: true, weeklyRem: 0.5, sessionRem: 0.9, weeklyReset: now.Add(6 * 24 * time.Hour)}, // weight 1
-		3: {ok: true, weeklyRem: 0.8, sessionRem: 0.9, weeklyReset: now.Add(24 * time.Hour)},     // 1 + 3*0.5*0.8   = 2.2
-		4: {ok: true, weeklyRem: 0.8, sessionRem: 0.9, weeklyReset: now.Add(6 * time.Hour)},      // 1 + 3*0.875*0.8 = 3.1
-		5: {ok: true, weeklyRem: 0.0, sessionRem: 0.9},                                           // exhausted
-		6: {ok: true, weeklyRem: 0.7, sessionRem: 0.9, weeklyReset: now.Add(-time.Hour)},         // reset already passed: still usable, no boost
-		7: {ok: true, weeklyRem: 0.9, sessionRem: 0.0},                                           // exhausted
+		0: {weeklyRem: 0.9, sessionRem: 0.9, weeklyReset: now.Add(5 * 24 * time.Hour)}, // weight 1
+		1: {weeklyRem: 0.5, sessionRem: 0.9, weeklyReset: now.Add(6 * 24 * time.Hour)}, // weight 1
+		3: {weeklyRem: 0.8, sessionRem: 0.9, weeklyReset: now.Add(24 * time.Hour)},     // 1 + 3*0.5*0.8   = 2.2
+		4: {weeklyRem: 0.8, sessionRem: 0.9, weeklyReset: now.Add(6 * time.Hour)},      // 1 + 3*0.875*0.8 = 3.1
+		5: {weeklyRem: 0.0, sessionRem: 0.9},                                           // exhausted
+		6: {weeklyRem: 0.7, sessionRem: 0.9, weeklyReset: now.Add(-time.Hour)},         // reset already passed: still usable, no boost
+		7: {weeklyRem: 0.9, sessionRem: 0.0},                                           // exhausted
 	}
 	m.mu.Unlock()
 	// key 2 unknown: weight 1. Total weight 8.3.
@@ -192,12 +189,12 @@ func TestResetBoost(t *testing.T) {
 		u    keyUsage
 		want float64
 	}{
-		{"unknown reset", keyUsage{ok: true, weeklyRem: 0.9}, 0},
-		{"far from reset", keyUsage{ok: true, weeklyRem: 0.9, weeklyReset: now.Add(5 * 24 * time.Hour)}, 0},
-		{"reset already passed", keyUsage{ok: true, weeklyRem: 0.9, weeklyReset: now.Add(-time.Hour)}, 0},
-		{"half the window, 80% weekly left", keyUsage{ok: true, weeklyRem: 0.8, weeklyReset: now.Add(24 * time.Hour)}, 3 * 0.5 * 0.8},
-		{"at reset, full weekly", keyUsage{ok: true, weeklyRem: 1, weeklyReset: now.Add(time.Millisecond)}, 3},
-		{"at reset, empty weekly", keyUsage{ok: true, weeklyRem: 0, weeklyReset: now.Add(time.Millisecond)}, 0},
+		{"unknown reset", keyUsage{weeklyRem: 0.9}, 0},
+		{"far from reset", keyUsage{weeklyRem: 0.9, weeklyReset: now.Add(5 * 24 * time.Hour)}, 0},
+		{"reset already passed", keyUsage{weeklyRem: 0.9, weeklyReset: now.Add(-time.Hour)}, 0},
+		{"half the window, 80% weekly left", keyUsage{weeklyRem: 0.8, weeklyReset: now.Add(24 * time.Hour)}, 3 * 0.5 * 0.8},
+		{"at reset, full weekly", keyUsage{weeklyRem: 1, weeklyReset: now.Add(time.Millisecond)}, 3},
+		{"at reset, empty weekly", keyUsage{weeklyRem: 0, weeklyReset: now.Add(time.Millisecond)}, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -219,7 +216,7 @@ func TestProxySkipsExhaustedKey(t *testing.T) {
 	srv, gw := newTestGateway(t, func(c *Config) {
 		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL, Usage: usageStub.server.URL}
 	})
-	gw.RefreshUsage()
+	gw.refreshUsage()
 
 	// No messages field: no sticky binding, the quota order decides.
 	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
@@ -251,7 +248,7 @@ func TestStickySkipsKeyThatRunsOutOfQuota(t *testing.T) {
 	// k1's weekly quota runs out; the binding must be skipped pre-emptively,
 	// without paying a 429 round trip first.
 	usageStub.weekly["k1"] = 0
-	gw.RefreshUsage()
+	gw.refreshUsage()
 	chatWithPrefix(t, srv.URL, "proj A")
 	if got := expectAuth(t, seen); got != "Bearer k2" {
 		t.Fatalf("after quota ran out the conversation used %q, want Bearer k2 directly", got)
@@ -292,7 +289,7 @@ func TestProxyShiftsTowardKeyAboutToExpire(t *testing.T) {
 	srv, gw := newTestGateway(t, func(c *Config) {
 		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL, Usage: usageStub.server.URL}
 	})
-	gw.RefreshUsage()
+	gw.refreshUsage()
 
 	counts := map[string]int{}
 	for range 30 {
@@ -323,7 +320,7 @@ func TestProxyAlternatesKeysWhenNoneIsRamping(t *testing.T) {
 	srv, gw := newTestGateway(t, func(c *Config) {
 		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL, Usage: usageStub.server.URL}
 	})
-	gw.RefreshUsage()
+	gw.refreshUsage()
 
 	for _, want := range []string{"Bearer k1", "Bearer k2"} {
 		resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
