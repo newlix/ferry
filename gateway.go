@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -217,9 +216,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 			g.log.Verbose.Printf("%s %s model=%s key=%s status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), g.cfg.APIKeys[keyIdx].Name, time.Since(start).Round(time.Millisecond), err)
 			return
 		}
-		// 401/403: key invalid or expired. 429: plan rate limit. These are the
-		// failures another key can fix; everything else is passed through.
-		if !slices.Contains([]int{http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests}, resp.StatusCode) || i == len(order)-1 {
+		if !failoverStatus(resp.StatusCode) || i == len(order)-1 {
 			break
 		}
 		reason := peekError(resp.Body)
@@ -339,6 +336,13 @@ func (s *streamWriter) Write(p []byte) (int, error) {
 		s.flusher.Flush()
 	}
 	return n, err
+}
+
+// failoverStatus reports whether an upstream status is a key failure another
+// key can fix: 401/403 (key invalid or expired), 429 (plan rate limit).
+// Everything else is passed through.
+func failoverStatus(code int) bool {
+	return code == http.StatusUnauthorized || code == http.StatusForbidden || code == http.StatusTooManyRequests
 }
 
 func peekError(r io.Reader) string {
