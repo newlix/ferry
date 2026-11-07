@@ -82,7 +82,7 @@ func LoadConfig(path string) (Config, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		if strings.Contains(err.Error(), "unknown field") {
-			return Config{}, fmt.Errorf("parse %s: %w (the file holds only \"listen\" and \"models\"; keys now live in the key store: glms key add)", path, err)
+			return Config{}, fmt.Errorf("parse %s: %w (the file holds only \"listen\" and \"models\"; keys now live in the key store: ferry key add)", path, err)
 		}
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
@@ -115,13 +115,13 @@ func (c Config) ModelNames() []string {
 
 func configDir() string {
 	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-		return filepath.Join(dir, "glms")
+		return filepath.Join(dir, "ferry")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "glms"
+		return "ferry"
 	}
-	return filepath.Join(home, ".config", "glms")
+	return filepath.Join(home, ".config", "ferry")
 }
 
 // defaultConfigPath follows the ~/.config convention shared with opencode,

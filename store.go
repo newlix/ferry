@@ -25,7 +25,7 @@ type KeyStore interface {
 
 func NewKeyStore(dir string) KeyStore {
 	if runtime.GOOS == "darwin" {
-		return &keychainStore{dir: dir, service: "glms"}
+		return &keychainStore{dir: dir, service: "ferry"}
 	}
 	return &fileStore{dir: dir}
 }

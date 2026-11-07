@@ -158,7 +158,7 @@ func (g *Gateway) handleUsage(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	start := time.Now()
 	if len(g.cfg.APIKeys) == 0 {
-		writeError(w, http.StatusServiceUnavailable, "glms has no keys; add one: glms key add", u.anthropic)
+		writeError(w, http.StatusServiceUnavailable, "ferry has no keys; add one: ferry key add", u.anthropic)
 		return
 	}
 

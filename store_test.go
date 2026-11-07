@@ -69,12 +69,12 @@ func TestSecurityArgs(t *testing.T) {
 		op   string
 		want []string
 	}{
-		{"add", []string{"add-generic-password", "-s", "glms", "-a", "pro", "-w", "sk-1", "-U"}},
-		{"find", []string{"find-generic-password", "-s", "glms", "-a", "pro", "-w"}},
-		{"delete", []string{"delete-generic-password", "-s", "glms", "-a", "pro"}},
+		{"add", []string{"add-generic-password", "-s", "ferry", "-a", "pro", "-w", "sk-1", "-U"}},
+		{"find", []string{"find-generic-password", "-s", "ferry", "-a", "pro", "-w"}},
+		{"delete", []string{"delete-generic-password", "-s", "ferry", "-a", "pro"}},
 	}
 	for _, tt := range tests {
-		got := securityArgs(tt.op, "glms", "pro", "sk-1")
+		got := securityArgs(tt.op, "ferry", "pro", "sk-1")
 		if !slices.Equal(got, tt.want) {
 			t.Errorf("securityArgs(%q) = %v, want %v", tt.op, got, tt.want)
 		}

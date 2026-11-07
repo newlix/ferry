@@ -1,4 +1,4 @@
-module glms
+module ferry
 
 go 1.27.3
 

@@ -63,7 +63,7 @@ func TestLoadConfigRejectsLegacyFields(t *testing.T) {
 	if err == nil {
 		t.Fatal("config with apiKeys, want loud failure")
 	}
-	if !strings.Contains(err.Error(), "glms key add") {
+	if !strings.Contains(err.Error(), "ferry key add") {
 		t.Errorf("error does not tell the user where keys live now: %v", err)
 	}
 }

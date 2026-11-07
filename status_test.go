@@ -114,7 +114,7 @@ func TestCmdStatusInvalidKey(t *testing.T) {
 	if err := cmdStatus(cfg, store, &out); err != nil {
 		t.Fatalf("cmdStatus: %v", err)
 	}
-	if !strings.Contains(out.String(), "invalid key. Remove it:  glms key remove pro") {
+	if !strings.Contains(out.String(), "invalid key. Remove it:  ferry key remove pro") {
 		t.Errorf("status does not call a dead key a dead key:\n%s", out.String())
 	}
 }
@@ -129,7 +129,7 @@ func TestCmdStatusNoKeys(t *testing.T) {
 	if err := cmdStatus(cfg, store, &out); err != nil {
 		t.Fatalf("cmdStatus: %v", err)
 	}
-	if !strings.Contains(out.String(), "glms key add") {
+	if !strings.Contains(out.String(), "ferry key add") {
 		t.Errorf("empty status does not point at the next step:\n%s", out.String())
 	}
 }

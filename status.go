@@ -16,17 +16,17 @@ import (
 // itself is down.
 func cmdStatus(cfg Config, store KeyStore, out io.Writer) error {
 	running := healthCheck(cfg.Listen)
-	line := "glms not running"
+	line := "ferry not running"
 	if running {
-		line = "glms running at http://" + cfg.Listen
+		line = "ferry running at http://" + cfg.Listen
 	}
 	switch {
 	case serviceInstalled() && running:
 		line += " (starts at login)"
 	case serviceInstalled() && !running:
-		line += " (starts at login; logs: " + filepath.Join(configDir(), "glms.log") + ")"
+		line += " (starts at login; logs: " + filepath.Join(configDir(), "ferry.log") + ")"
 	case !serviceInstalled() && !running:
-		line += " (glms install starts it at login)"
+		line += " (ferry install starts it at login)"
 	}
 	fmt.Fprintf(out, "%s\n\n", line)
 
@@ -35,7 +35,7 @@ func cmdStatus(cfg Config, store KeyStore, out io.Writer) error {
 		return err
 	}
 	if len(names) == 0 {
-		fmt.Fprintln(out, "No keys yet. Add one:  glms key add")
+		fmt.Fprintln(out, "No keys yet. Add one:  ferry key add")
 		return nil
 	}
 	m := newUsageMonitor(cfg.Upstreams.Usage, NewNullLogger())
@@ -56,7 +56,7 @@ func renderKeyStatus(out io.Writer, name string, u keyUsage, err error) {
 		var ce *consoleError
 		if errors.As(err, &ce) {
 			if ce.code == 401 || ce.code == 403 {
-				fmt.Fprintf(out, "  %-14s invalid key. Remove it:  glms key remove %s\n", name, name)
+				fmt.Fprintf(out, "  %-14s invalid key. Remove it:  ferry key remove %s\n", name, name)
 				return
 			}
 			fmt.Fprintf(out, "  %-14s quota unknown (z.ai error: %s)\n", name, ce.msg)

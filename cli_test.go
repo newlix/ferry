@@ -92,8 +92,8 @@ func TestCmdInstallRefusesWithoutKeys(t *testing.T) {
 	if err == nil {
 		t.Fatal("install without keys accepted, want refusal")
 	}
-	if !strings.Contains(err.Error(), "glms key add") {
-		t.Errorf("error = %v, want it to point at glms key add", err)
+	if !strings.Contains(err.Error(), "ferry key add") {
+		t.Errorf("error = %v, want it to point at ferry key add", err)
 	}
 }
 
@@ -131,13 +131,13 @@ func TestReadSecretPlain(t *testing.T) {
 }
 
 func TestPlistContent(t *testing.T) {
-	got := plistContent("/usr/local/bin/glms", "/Users/x/.config/glms/glms.log", "glms")
+	got := plistContent("/usr/local/bin/ferry", "/Users/x/.config/ferry/ferry.log", "ferry")
 	for _, want := range []string{
-		"<string>glms</string>",
-		"<string>/usr/local/bin/glms</string>",
+		"<string>ferry</string>",
+		"<string>/usr/local/bin/ferry</string>",
 		"<key>RunAtLoad</key>",
 		"<key>KeepAlive</key>",
-		"<string>/Users/x/.config/glms/glms.log</string>",
+		"<string>/Users/x/.config/ferry/ferry.log</string>",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("plist missing %q:\n%s", want, got)

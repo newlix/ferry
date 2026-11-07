@@ -1,10 +1,10 @@
-# glms
+# ferry
 
 This project is written entirely by agents and is fully optimized for agent
 vibe coding, debugging and RSI.
 
-glms is a local API gateway in front of the GLM Coding Plan (z.ai). You add a
-GLM Coding Plan key once; after that glms picks the right key for every
+ferry is a local API gateway in front of the GLM Coding Plan (z.ai). You add a
+GLM Coding Plan key once; after that ferry picks the right key for every
 request (quota left, plan expiry), keeps each conversation on one account
 (prompt-cache friendly), and fails over across keys on rate limits. Tools
 talk to `127.0.0.1:8787` and never see a real key.
@@ -13,7 +13,7 @@ talk to `127.0.0.1:8787` and never see a real key.
 opencode / Claude Code / any tool
         │
         ▼
-glms (127.0.0.1:8787)
+ferry (127.0.0.1:8787)
         │  Authorization: Bearer <coding-plan key>
         │  key order: smooth weighted round-robin; keys about to lose unused weekly quota gain weight
         │  one conversation → one key (sticky); 401/403/429 → next key + rebind
@@ -24,17 +24,17 @@ api.z.ai coding endpoints
 ## Quick start
 
 ```sh
-go build -o /usr/local/bin/glms .
-glms            # first run: paste your GLM Coding Plan key (input hidden), name it, then it serves
-glms status     # keys, plans, quota, running state
-glms install    # start at login (logs: ~/.config/glms/glms.log)
+go build -o /usr/local/bin/ferry .
+ferry            # first run: paste your GLM Coding Plan key (input hidden), name it, then it serves
+ferry status     # keys, plans, quota, running state
+ferry install    # start at login (logs: ~/.config/ferry/ferry.log)
 ```
 
 Keys are verified when added (plan name, quota, expiry are fetched and
 shown) and stored in the macOS Keychain; on other systems they fall back to
-`~/.config/glms/keys.json` (0600). `glms key add` and `glms key remove NAME`
-manage them (`glms status` lists them); glms restarts itself after a key
-change. By default glms is quiet — start it with `-v` to log every request.
+`~/.config/ferry/keys.json` (0600). `ferry key add` and `ferry key remove NAME`
+manage them (`ferry status` lists them); ferry restarts itself after a key
+change. By default ferry is quiet — start it with `-v` to log every request.
 
 ## opencode
 
@@ -44,12 +44,12 @@ change. By default glms is quiet — start it with `-v` to log every request.
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
-    "glms": {
+    "ferry": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "GLM Coding Plan (glms)",
+      "name": "GLM Coding Plan (ferry)",
       "options": {
         "baseURL": "http://127.0.0.1:8787/v1",
-        "apiKey": "glms"
+        "apiKey": "ferry"
       },
       "models": {
         "glm-5.3": { "name": "GLM-5.3" },
@@ -58,11 +58,11 @@ change. By default glms is quiet — start it with `-v` to log every request.
       }
     }
   },
-  "model": "glms/glm-5.3"
+  "model": "ferry/glm-5.3"
 }
 ```
 
-Restart opencode, run `/models` and pick a `glms` model. The `apiKey` value
+Restart opencode, run `/models` and pick a `ferry` model. The `apiKey` value
 is a placeholder the gateway ignores; localhost is the security boundary.
 
 ## Endpoints
@@ -73,7 +73,7 @@ is a placeholder the gateway ignores; localhost is the security boundary.
 | `POST /v1/responses` | `https://api.z.ai/api/v1/responses` |
 | `POST /v1/messages` (+ `/v1/messages/count_tokens`) | `https://api.z.ai/api/anthropic/v1/messages` |
 | `GET /v1/models` | local: the models configured below |
-| `GET /v1/usage` | local: per-key quota, plan and expiry (`glms status` is the human view) |
+| `GET /v1/usage` | local: per-key quota, plan and expiry (`ferry status` is the human view) |
 | `GET /health` | local |
 
 Requests and responses pass through byte-for-byte (SSE streams included,
@@ -84,7 +84,7 @@ supported yet.
 
 ## Configuration
 
-Optional file `~/.config/glms/config.json` — everything has a default:
+Optional file `~/.config/ferry/config.json` — everything has a default:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -99,12 +99,12 @@ reaches a real model:
 ```
 
 Keys live in the Keychain, never in this file; a config that still carries
-`apiKeys` or `upstreams` from an older glms fails loudly with a hint.
+`apiKeys` or `upstreams` from an older ferry fails loudly with a hint.
 
 ## Behavior notes
 
 - Key selection is smooth weighted round-robin. Every 5 minutes (and right
-  after any 429 failover) glms reads each key's remaining 5-hour and weekly
+  after any 429 failover) ferry reads each key's remaining 5-hour and weekly
   quota, reset times and plan name from the console endpoints z.ai's own
   subscription UI uses (`/api/monitor/usage/quota/limit` and
   `/api/biz/subscription/list`, undocumented but stable in practice).

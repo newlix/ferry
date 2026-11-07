@@ -14,13 +14,13 @@ import (
 
 func main() {
 	if err := dispatch(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "glms:", err)
+		fmt.Fprintln(os.Stderr, "ferry:", err)
 		os.Exit(1)
 	}
 }
 
 func dispatch(args []string) error {
-	// Bare glms and glms with run flags (-v) both run the gateway; only
+	// Bare ferry and ferry with run flags (-v) both run the gateway; only
 	// words select a verb.
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return cmdRun(args)
@@ -49,7 +49,7 @@ func dispatch(args []string) error {
 				return cmdKeyRemove(NewKeyStore(configDir()), args[2:])
 			}
 		}
-		return errors.New("usage: glms key add | glms key remove NAME")
+		return errors.New("usage: ferry key add | ferry key remove NAME")
 	default:
 		printUsage(os.Stdout)
 		return fmt.Errorf("unknown command %q", args[0])
@@ -77,13 +77,13 @@ func serve(cfg Config, log Logger) error {
 	if n == 1 {
 		plural = ""
 	}
-	log.Quiet.Printf("glms listening on http://%s (%d key%s)", cfg.Listen, n, plural)
+	log.Quiet.Printf("ferry listening on http://%s (%d key%s)", cfg.Listen, n, plural)
 
 	select {
 	case err := <-serveErr:
 		if !errors.Is(err, http.ErrServerClosed) {
 			if errors.Is(err, syscall.EADDRINUSE) {
-				return fmt.Errorf("%s is already in use; another glms may be running. Check with:  glms status", cfg.Listen)
+				return fmt.Errorf("%s is already in use; another ferry may be running. Check with:  ferry status", cfg.Listen)
 			}
 			return err
 		}

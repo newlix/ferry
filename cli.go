@@ -16,20 +16,20 @@ import (
 )
 
 const (
-	serviceLabel = "glms"
+	serviceLabel = "ferry"
 	launchctlBin = "/bin/launchctl"
 )
 
 func printUsage(out io.Writer) {
-	fmt.Fprint(out, `glms — local API gateway for the GLM Coding Plan
+	fmt.Fprint(out, `ferry — local API gateway for the GLM Coding Plan
 
 Usage:
-  glms               run the gateway in the foreground (first run asks for a key)
-  glms status        show keys, plans, quota and running state
-  glms key add       add a GLM Coding Plan key (verified, stored in the Keychain)
-  glms key remove    remove a key by name
-  glms install       start glms at login
-  glms uninstall     stop starting at login
+  ferry               run the gateway in the foreground (first run asks for a key)
+  ferry status        show keys, plans, quota and running state
+  ferry key add       add a GLM Coding Plan key (verified, stored in the Keychain)
+  ferry key remove    remove a key by name
+  ferry install       start ferry at login
+  ferry uninstall     stop starting at login
 
 Run flags: -v (log every request)
 `)
@@ -55,7 +55,7 @@ func cmdRun(args []string) error {
 	}
 	if len(cfg.APIKeys) == 0 {
 		if !isTerminal(os.Stdin) {
-			return errors.New("no keys yet. Add one:  glms key add")
+			return errors.New("no keys yet. Add one:  ferry key add")
 		}
 		fmt.Println("No GLM Coding Plan key yet. Add one now.")
 		if err := cmdKeyAdd(cfg, store, os.Stdin, os.Stdout, false); err != nil {
@@ -64,7 +64,7 @@ func cmdRun(args []string) error {
 		if serviceInstalled() {
 			// The login service loads the key on its next restart; serving
 			// here would only fight it for the port.
-			fmt.Println("glms starts at login and now has a key. Check it:  glms status")
+			fmt.Println("ferry starts at login and now has a key. Check it:  ferry status")
 			return nil
 		}
 		if err := loadKeys(&cfg, store); err != nil {
@@ -106,7 +106,7 @@ func cmdKeyAdd(cfg Config, store KeyStore, in io.Reader, out io.Writer, suggestI
 		return err
 	}
 	if secret == "" {
-		return errors.New("no key entered, nothing saved. Add one with:  glms key add")
+		return errors.New("no key entered, nothing saved. Add one with:  ferry key add")
 	}
 
 	m := newUsageMonitor(cfg.Upstreams.Usage, NewNullLogger())
@@ -123,7 +123,7 @@ func cmdKeyAdd(cfg Config, store KeyStore, in io.Reader, out io.Writer, suggestI
 
 	name := promptDefault(reader, out, "Name this key", defaultKeyName(names))
 	if slices.Contains(names, name) {
-		return fmt.Errorf("a key named %q already exists (remove it first: glms key remove %s)", name, name)
+		return fmt.Errorf("a key named %q already exists (remove it first: ferry key remove %s)", name, name)
 	}
 	if err := store.Add(name, secret); err != nil {
 		return err
@@ -145,17 +145,17 @@ func defaultKeyName(names []string) string {
 
 func cmdKeyRemove(store KeyStore, args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: glms key remove NAME (see: glms status)")
+		return errors.New("usage: ferry key remove NAME (see: ferry status)")
 	}
 	names, err := store.Names()
 	if err != nil {
 		return err
 	}
 	if !slices.Contains(names, args[0]) {
-		return fmt.Errorf("no key named %q (see:  glms status)", args[0])
+		return fmt.Errorf("no key named %q (see:  ferry status)", args[0])
 	}
 	if serviceInstalled() && len(names) == 1 {
-		return fmt.Errorf("%q is the last key, and glms starts at login. Add another key first or stop starting at login:  glms uninstall", args[0])
+		return fmt.Errorf("%q is the last key, and ferry starts at login. Add another key first or stop starting at login:  ferry uninstall", args[0])
 	}
 	if err := store.Remove(args[0]); err != nil {
 		return err
@@ -173,7 +173,7 @@ func cmdInstall(store KeyStore) error {
 	if len(names) == 0 {
 		// Installing keyless would bootstrap a service that exits and is
 		// restarted by KeepAlive forever.
-		return errors.New("no keys yet. Add one:  glms key add")
+		return errors.New("no keys yet. Add one:  ferry key add")
 	}
 	execPath, err := os.Executable()
 	if err != nil {
@@ -186,7 +186,7 @@ func cmdInstall(store KeyStore) error {
 	if err := os.MkdirAll(filepath.Dir(plist), 0o755); err != nil {
 		return err
 	}
-	logPath := filepath.Join(configDir(), "glms.log")
+	logPath := filepath.Join(configDir(), "ferry.log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return err
 	}
@@ -198,7 +198,7 @@ func cmdInstall(store KeyStore) error {
 	exec.Command(launchctlBin, "bootout", domain+"/"+serviceLabel).Run()
 	waitServiceGone(domain, 3*time.Second)
 	if out, err := exec.Command(launchctlBin, "bootstrap", domain, plist).CombinedOutput(); err != nil {
-		return fmt.Errorf("could not start glms at login: %v: %s", err, out)
+		return fmt.Errorf("could not start ferry at login: %v: %s", err, out)
 	}
 	time.Sleep(500 * time.Millisecond)
 	cfg, err := LoadConfig(defaultConfigPath())
@@ -208,7 +208,7 @@ func cmdInstall(store KeyStore) error {
 	if healthCheck(cfg.Listen) {
 		fmt.Printf("Installed and running at http://%s (logs: %s).\n", cfg.Listen, logPath)
 	} else {
-		fmt.Printf("Installed; give it a moment, then check:  glms status  (logs: %s)\n", logPath)
+		fmt.Printf("Installed; give it a moment, then check:  ferry status  (logs: %s)\n", logPath)
 	}
 	return nil
 }
@@ -219,7 +219,7 @@ func cmdUninstall() error {
 	if err := os.Remove(plistPath()); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	fmt.Println("glms no longer starts at login.")
+	fmt.Println("ferry no longer starts at login.")
 	return nil
 }
 
@@ -236,19 +236,19 @@ func waitServiceGone(domain string, timeout time.Duration) {
 	}
 }
 
-// applyKeyChange restarts an installed glms so a key change takes effect at
+// applyKeyChange restarts an installed ferry so a key change takes effect at
 // once. suggestInstall is false on first run and after a removal: the install
 // hint would interrupt the flow the user is already in.
 func applyKeyChange(out io.Writer, suggestInstall bool) {
 	if !serviceInstalled() {
 		if suggestInstall {
-			fmt.Fprintln(out, "Not set to start at login. Set it with:  glms install")
+			fmt.Fprintln(out, "Not set to start at login. Set it with:  ferry install")
 		}
 		return
 	}
 	uid := strconv.Itoa(os.Getuid())
 	if err := exec.Command(launchctlBin, "kickstart", "-k", "gui/"+uid+"/"+serviceLabel).Run(); err != nil {
-		fmt.Fprintf(out, "Could not restart glms; the new keys load at your next login (logs: %s)\n", filepath.Join(configDir(), "glms.log"))
+		fmt.Fprintf(out, "Could not restart ferry; the new keys load at your next login (logs: %s)\n", filepath.Join(configDir(), "ferry.log"))
 		return
 	}
 	fmt.Fprintln(out, "Restarted with the new keys.")
@@ -264,7 +264,7 @@ var serviceInstalled = func() bool {
 func plistPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "glms.plist"
+		return "ferry.plist"
 	}
 	return filepath.Join(home, "Library", "LaunchAgents", serviceLabel+".plist")
 }
