@@ -20,6 +20,9 @@ func main() {
 }
 
 func dispatch(args []string) error {
+	if err := migrateGlms(); err != nil {
+		return err
+	}
 	// Bare ferry and ferry with run flags (-v) both run the gateway; only
 	// words select a verb.
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {

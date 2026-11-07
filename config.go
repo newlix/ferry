@@ -113,16 +113,18 @@ func (c Config) ModelNames() []string {
 	return names
 }
 
-func configDir() string {
+func configDirNamed(name string) string {
 	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-		return filepath.Join(dir, "ferry")
+		return filepath.Join(dir, name)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "ferry"
+		return name
 	}
-	return filepath.Join(home, ".config", "ferry")
+	return filepath.Join(home, ".config", name)
 }
+
+func configDir() string { return configDirNamed("ferry") }
 
 // defaultConfigPath follows the ~/.config convention shared with opencode,
 // not the macOS Application Support location os.UserConfigDir returns.

@@ -196,7 +196,7 @@ func cmdInstall(store KeyStore) error {
 	uid := strconv.Itoa(os.Getuid())
 	domain := "gui/" + uid
 	exec.Command(launchctlBin, "bootout", domain+"/"+serviceLabel).Run()
-	waitServiceGone(domain, 3*time.Second)
+	waitServiceGone(domain, serviceLabel, 3*time.Second)
 	if out, err := exec.Command(launchctlBin, "bootstrap", domain, plist).CombinedOutput(); err != nil {
 		return fmt.Errorf("could not start ferry at login: %v: %s", err, out)
 	}
@@ -226,10 +226,10 @@ func cmdUninstall() error {
 // waitServiceGone blocks until launchd no longer knows the service: bootout
 // is asynchronous, and bootstrapping while the old instance is still tearing
 // down fails with "Input/output error".
-func waitServiceGone(domain string, timeout time.Duration) {
+func waitServiceGone(domain, label string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if err := exec.Command(launchctlBin, "print", domain+"/"+serviceLabel).Run(); err != nil {
+		if err := exec.Command(launchctlBin, "print", domain+"/"+label).Run(); err != nil {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -261,13 +261,15 @@ var serviceInstalled = func() bool {
 	return err == nil
 }
 
-func plistPath() string {
+func plistPathNamed(label string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "ferry.plist"
+		return label + ".plist"
 	}
-	return filepath.Join(home, "Library", "LaunchAgents", serviceLabel+".plist")
+	return filepath.Join(home, "Library", "LaunchAgents", label+".plist")
 }
+
+func plistPath() string { return plistPathNamed(serviceLabel) }
 
 // plistContent is split out so its shape is testable without touching launchd.
 func plistContent(execPath, logPath, label string) string {
