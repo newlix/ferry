@@ -295,37 +295,3 @@ func (m *usageMonitor) usable(i int) bool {
 	u, ok := m.state[i]
 	return !ok || (u.weeklyRem > 0 && u.sessionRem > 0)
 }
-
-type usageEntry struct {
-	Key             int     `json:"key"`
-	Plan            string  `json:"plan,omitempty"`
-	Weekly          float64 `json:"weeklyRemainingPercent"`
-	Session         float64 `json:"sessionRemainingPercent"`
-	WeekResetsAt    string  `json:"weekResetsAt,omitempty"`
-	SessionResetsAt string  `json:"sessionResetsAt,omitempty"`
-}
-
-func (m *usageMonitor) snapshot(n int) []usageEntry {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	entries := make([]usageEntry, 0, n)
-	for i := range n {
-		e := usageEntry{Key: i + 1, Weekly: 100, Session: 100}
-		if u, ok := m.state[i]; ok {
-			e.Plan = u.planName
-			e.Weekly = u.weeklyRem * 100
-			e.Session = u.sessionRem * 100
-			e.WeekResetsAt = rfc3339(u.weeklyReset)
-			e.SessionResetsAt = rfc3339(u.sessionReset)
-		}
-		entries = append(entries, e)
-	}
-	return entries
-}
-
-func rfc3339(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.Format(time.RFC3339)
-}

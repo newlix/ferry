@@ -81,7 +81,6 @@ func NewGateway(cfg Config, log Logger) *Gateway {
 	g.routes = []route{
 		{http.MethodGet, "/health", g.handleHealth},
 		{http.MethodGet, "/v1/models", g.handleModels},
-		{http.MethodGet, "/v1/usage", g.handleUsage},
 		{http.MethodPost, "/v1/chat/completions", g.proxyRoute(upstream{base: cfg.Upstreams.OpenAIChat, path: "/chat/completions"})},
 		{http.MethodPost, "/v1/responses", g.proxyRoute(upstream{base: cfg.Upstreams.OpenAIResponses, path: "/responses"})},
 		{http.MethodPost, "/v1/messages", g.proxyRoute(upstream{base: cfg.Upstreams.Anthropic, path: "/v1/messages", anthropic: true})},
@@ -149,10 +148,6 @@ func (g *Gateway) proxyRoute(u upstream) http.HandlerFunc {
 
 func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (g *Gateway) handleUsage(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"keys": g.usage.snapshot(len(g.cfg.APIKeys))})
 }
 
 func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {

@@ -1,9 +1,7 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -336,52 +334,5 @@ func TestProxyAlternatesKeysWhenNoneIsRamping(t *testing.T) {
 		if got := expectAuth(t, seen); got != want {
 			t.Fatalf("even spread broken: got %q, want %q", got, want)
 		}
-	}
-}
-
-func TestUsageEndpoint(t *testing.T) {
-	usageStub := newZaiUsageStub(t)
-	srv, gw := newTestGateway(t, func(c *Config) {
-		c.Upstreams.Usage = usageStub.server.URL
-	})
-	gw.RefreshUsage()
-
-	resp, err := http.Get(srv.URL + "/v1/usage")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got struct {
-		Keys []struct {
-			Key             int     `json:"key"`
-			Plan            string  `json:"plan"`
-			Weekly          float64 `json:"weeklyRemainingPercent"`
-			Session         float64 `json:"sessionRemainingPercent"`
-			WeekResetsAt    string  `json:"weekResetsAt"`
-			SessionResetsAt string  `json:"sessionResetsAt"`
-		} `json:"keys"`
-	}
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatalf("parse %s: %v", body, err)
-	}
-	if len(got.Keys) != 2 {
-		t.Fatalf("keys = %d, want 2", len(got.Keys))
-	}
-	first := got.Keys[0]
-	if first.Plan != "GLM Coding Pro" {
-		t.Errorf("key 1 = %+v, want plan GLM Coding Pro", first)
-	}
-	if first.Weekly < 79 || first.Weekly > 81 {
-		t.Errorf("weekly = %.1f, want ~80", first.Weekly)
-	}
-	if reset, err := time.Parse(time.RFC3339, first.WeekResetsAt); err != nil || time.Until(reset) < 4*24*time.Hour {
-		t.Errorf("weekResetsAt = %q (%v), want an RFC3339 time ~5d out", first.WeekResetsAt, err)
-	}
-	if first.SessionResetsAt == "" {
-		t.Error("sessionResetsAt empty, want a time")
 	}
 }
