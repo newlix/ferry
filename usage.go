@@ -26,6 +26,8 @@ const (
 
 type keyUsage struct {
 	planName     string
+	planEnd      time.Time // end of the paid period; zero = unknown
+	autoRenew    bool
 	sessionRem   float64 // remaining fraction 0..1; 1 when the window is absent
 	weeklyRem    float64
 	sessionReset time.Time // zero = unknown
@@ -37,9 +39,10 @@ type usageMonitor struct {
 	base   string
 	log    Logger
 
-	mu    sync.Mutex
-	state map[int]keyUsage // keyed by apiKeys index
-	cw    map[int]float64  // smooth weighted round-robin current weights
+	mu          sync.Mutex
+	state       map[int]keyUsage // keyed by apiKeys index
+	cw          map[int]float64  // smooth weighted round-robin current weights
+	refreshedAt time.Time        // zero until the first refresh finishes
 }
 
 func newUsageMonitor(base string, log Logger) *usageMonitor {
@@ -68,6 +71,22 @@ func (m *usageMonitor) refresh(keys []apiKey) {
 		m.mu.Unlock()
 		m.log.Verbose.Printf("usage key=%s plan=%q weekly=%.0f%% (resets %s) session=%.0f%% (resets %s)", keys[i].Name, u.planName, u.weeklyRem*100, relTime(time.Until(u.weeklyReset)), u.sessionRem*100, relTime(time.Until(u.sessionReset)))
 	}
+	m.mu.Lock()
+	m.refreshedAt = time.Now()
+	m.mu.Unlock()
+}
+
+// snapshot copies the cached usage of keys 0..n-1; known[i] is false for a
+// key whose last fetch failed or has not happened yet.
+func (m *usageMonitor) snapshot(n int) (usage []keyUsage, known []bool, refreshedAt time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	usage = make([]keyUsage, n)
+	known = make([]bool, n)
+	for i := range n {
+		usage[i], known[i] = m.state[i]
+	}
+	return usage, known, m.refreshedAt
 }
 
 func (m *usageMonitor) fetchKey(key string) (keyUsage, error) {
@@ -75,9 +94,10 @@ func (m *usageMonitor) fetchKey(key string) (keyUsage, error) {
 	if err := m.fetchQuota(key, &u); err != nil {
 		return keyUsage{}, err
 	}
-	// Best-effort: the plan name may stay unknown.
-	plan, _ := m.fetchPlanName(key)
-	u.planName = plan
+	// Best-effort: the plan may stay unknown; quota alone drives key choice.
+	if err := m.fetchPlan(key, &u); err != nil {
+		m.log.Verbose.Printf("usage: plan lookup failed: %v", err)
+	}
 	return u, nil
 }
 
@@ -133,22 +153,39 @@ func (m *usageMonitor) fetchQuota(key string, u *keyUsage) error {
 	return nil
 }
 
-func (m *usageMonitor) fetchPlanName(key string) (string, error) {
+// fetchPlan reads the VALID subscription. The paid period ends at
+// nextRenewTime ("2027-08-12"); on live data (2026-11-14) the "valid" field
+// instead names the following, not yet paid period (paymentType WAIT_PAY),
+// so it is not used.
+func (m *usageMonitor) fetchPlan(key string, u *keyUsage) error {
 	var resp struct {
 		Data []struct {
-			ProductName string `json:"productName"`
-			Status      string `json:"status"`
+			ProductName   string `json:"productName"`
+			Status        string `json:"status"`
+			NextRenewTime string `json:"nextRenewTime"`
+			AutoRenew     int    `json:"autoRenew"`
 		} `json:"data"`
 	}
 	if err := m.getJSON(usagePathSubscription, key, &resp); err != nil {
-		return "", err
+		return err
 	}
 	for _, s := range resp.Data {
-		if s.Status == "VALID" {
-			return s.ProductName, nil
+		if s.Status != "VALID" {
+			continue
 		}
+		u.planName = s.ProductName
+		u.autoRenew = s.AutoRenew == 1
+		if s.NextRenewTime == "" {
+			return nil
+		}
+		end, err := time.ParseInLocation(time.DateOnly, s.NextRenewTime, time.Local)
+		if err != nil {
+			return fmt.Errorf("nextRenewTime: %w", err)
+		}
+		u.planEnd = end
+		return nil
 	}
-	return "", nil
+	return nil
 }
 
 // consoleError marks an endpoint reply the caller can act on: the console

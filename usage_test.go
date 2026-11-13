@@ -57,7 +57,7 @@ func newZaiUsageStub(t *testing.T) *zaiUsageStub {
 			(1-weeklyRem)*1000, time.Now().Add(stub.weeklyReset[key]).UnixMilli())
 	})
 	mux.HandleFunc("/api/biz/subscription/list", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"code":200,"data":[{"id":"1","productName":%q,"status":"VALID"}],"success":true}`, stub.plan)
+		fmt.Fprintf(w, `{"code":200,"data":[{"id":"1","productName":%q,"status":"VALID","autoRenew":0,"currentRenewTime":"2026-08-12","nextRenewTime":"2027-08-12","valid":"2027-08-12 20:08:05-2028-08-12 20:08:05","paymentType":"WAIT_PAY"}],"success":true}`, stub.plan)
 	})
 	stub.server = httptest.NewServer(mux)
 	t.Cleanup(stub.server.Close)
@@ -95,6 +95,9 @@ func TestUsageFetchParsesConsoleShapes(t *testing.T) {
 		}
 		if u.planName != "GLM Coding Pro" {
 			t.Errorf("key %s: planName = %q, want GLM Coding Pro", k, u.planName)
+		}
+		if want := time.Date(2027, 8, 12, 0, 0, 0, 0, time.Local); !u.planEnd.Equal(want) || u.autoRenew {
+			t.Errorf("key %s: planEnd = %v autoRenew = %v, want %v false", k, u.planEnd, u.autoRenew, want)
 		}
 		if left := time.Until(u.weeklyReset); left < 4*24*time.Hour || left > 5*24*time.Hour+time.Minute {
 			t.Errorf("key %s: weeklyReset in %v, want ~5d", k, left)

@@ -78,6 +78,7 @@ func NewGateway(cfg Config, log Logger) *Gateway {
 		log:    log,
 	}
 	g.routes = []route{
+		{http.MethodGet, "/", g.handleHome},
 		{http.MethodGet, "/health", g.handleHealth},
 		{http.MethodGet, "/v1/models", g.handleModels},
 		{http.MethodPost, "/v1/chat/completions", g.proxyRoute(upstream{base: cfg.Upstreams.OpenAIChat, path: "/chat/completions"})},

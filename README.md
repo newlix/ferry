@@ -73,6 +73,7 @@ is a placeholder the gateway ignores; localhost is the security boundary.
 | `POST /v1/responses` | `https://api.z.ai/api/v1/responses` |
 | `POST /v1/messages` (+ `/v1/messages/count_tokens`) | `https://api.z.ai/api/anthropic/v1/messages` |
 | `GET /v1/models` | local: the models configured below |
+| `GET /` | local: a page with each key's weekly and 5-hour quota left, plan end date, and the base URL to use |
 | `GET /health` | local |
 
 Requests and responses pass through byte-for-byte (SSE streams included,
