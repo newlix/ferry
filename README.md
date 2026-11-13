@@ -73,6 +73,7 @@ is a placeholder the gateway ignores; localhost is the security boundary.
 | `POST /v1/responses` | `https://api.z.ai/api/v1/responses` |
 | `POST /v1/messages` (+ `/v1/messages/count_tokens`) | `https://api.z.ai/api/anthropic/v1/messages` |
 | `GET /v1/models` | local: the models configured below |
+| `GET /v1/quota` | local: the home page's data as JSON (per key: plan, plan end, weekly and 5-hour `left` 0..1 with `resetsAt`; `null` windows while unknown) |
 | `GET /` | local: a page with each key's weekly and 5-hour quota left, plan end date, and the base URL to use |
 | `GET /health` | local |
 
@@ -123,7 +124,9 @@ Keys live in the Keychain, never in this file; a config that still carries
   key runs out of quota (skipped pre-emptively) or returns 401/403/429
   (rebound to the key that worked). On multi-account setups this keeps
   prompt-cache hits inside one account. Bindings expire after 30 idle
-  minutes.
+  minutes. A batch client whose independent requests share one system
+  prompt sends `X-Ferry-Sticky: off`: those requests go round-robin instead
+  of piling onto one key's rate limit.
 - Quiet output is the product; `-v` adds one line per request (path, model
   alias→target, key name, conversation hash, status, bytes, duration). Key
   rotations and quota fetch failures always print. Key material never

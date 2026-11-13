@@ -156,3 +156,34 @@ func TestStickyRebindsAfterRateLimitFailover(t *testing.T) {
 		t.Fatalf("after failover the conversation restarted on %q, want Bearer k2 directly", got)
 	}
 }
+
+// A batch client's independent requests share one system prompt; with
+// stickiness off they spread across keys instead of piling onto one, and the
+// header does not reach z.ai.
+func TestStickyOffSpreadsSamePrefixAcrossKeys(t *testing.T) {
+	headers := make(chan string, 16)
+	upstream, seen := upstreamRecordingKeys(t, func(auth string, w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{}`))
+	})
+	inner := upstream.Config.Handler
+	upstream.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers <- r.Header.Get(stickyHeader)
+		inner.ServeHTTP(w, r)
+	})
+	srv, _ := newTestGateway(t, func(c *Config) {
+		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
+	})
+	body := `{"model":"glm-5.3","messages":[{"role":"system","content":"judge"},{"role":"user","content":"line"}]}`
+	for range 2 {
+		resp := postJSON(t, srv.URL+"/v1/chat/completions", map[string]string{stickyHeader: stickyOff}, body)
+		resp.Body.Close()
+	}
+	first, second := expectAuth(t, seen), expectAuth(t, seen)
+	if first == second {
+		t.Fatalf("both requests went to %q, want round-robin across keys", first)
+	}
+	if h := <-headers; h != "" {
+		t.Errorf("upstream saw %s: %q, want it dropped", stickyHeader, h)
+	}
+}

@@ -20,6 +20,14 @@ const (
 	stickyMaxEntries = 10000
 )
 
+// stickyHeader: stickyOff routes a request round-robin, unbound. A batch
+// client sends it when many independent requests share one system prompt:
+// they would all hash to one conversation and pile onto one key's rate limit.
+const (
+	stickyHeader = "X-Ferry-Sticky"
+	stickyOff    = "off"
+)
+
 // stickySessions binds conversation hashes to upstream keys, so a
 // multi-account setup keeps one conversation on one account and its
 // prompt-cache hits.

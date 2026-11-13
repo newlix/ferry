@@ -81,6 +81,7 @@ func NewGateway(cfg Config, log Logger) *Gateway {
 		{http.MethodGet, "/", g.handleHome},
 		{http.MethodGet, "/health", g.handleHealth},
 		{http.MethodGet, "/v1/models", g.handleModels},
+		{http.MethodGet, "/v1/quota", g.handleQuota},
 		{http.MethodPost, "/v1/chat/completions", g.proxyRoute(upstream{base: cfg.Upstreams.OpenAIChat, path: "/chat/completions"})},
 		{http.MethodPost, "/v1/responses", g.proxyRoute(upstream{base: cfg.Upstreams.OpenAIResponses, path: "/responses"})},
 		{http.MethodPost, "/v1/messages", g.proxyRoute(upstream{base: cfg.Upstreams.Anthropic, path: "/v1/messages", anthropic: true})},
@@ -185,7 +186,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	// response.
 	order := g.usage.candidateOrder(len(g.cfg.APIKeys), start)
 	sessionID := uint64(0)
-	if len(g.cfg.APIKeys) > 1 {
+	if len(g.cfg.APIKeys) > 1 && r.Header.Get(stickyHeader) != stickyOff {
 		sessionID = affinityID(obj, mapped)
 		if sessionID != 0 {
 			if k := g.sticky.get(sessionID, start); k >= 0 && g.usage.usable(k) {
@@ -297,7 +298,7 @@ func applyModelAlias(obj map[string]json.RawMessage, body []byte, aliases map[st
 func copyForwardedHeaders(dst, src http.Header) {
 	for name, vals := range src {
 		switch http.CanonicalHeaderKey(name) {
-		case "Authorization", "X-Api-Key", "Host", "Content-Length", "Accept-Encoding":
+		case "Authorization", "X-Api-Key", "Host", "Content-Length", "Accept-Encoding", stickyHeader:
 			continue
 		}
 		switch http.CanonicalHeaderKey(name) {
