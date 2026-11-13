@@ -40,7 +40,7 @@ func TestHomeShowsQuotaAndPlanEnd(t *testing.T) {
 		"2 keys · quota checked just now",
 		"80% left",
 		"10% left",
-		`class="fill low"`,
+		`data-color="error"`,
 		"90% left",
 		"Refills in 1h 59m",
 		"Ends Aug 12, 2028",
@@ -50,6 +50,26 @@ func TestHomeShowsQuotaAndPlanEnd(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %q", want)
 		}
+	}
+}
+
+// the page links ciderui's console stylesheet, and ferry serves it
+func TestHomeServesItsStylesheet(t *testing.T) {
+	srv, _ := newTestGateway(t, nil)
+	body := getHome(t, srv.URL)
+	start := strings.Index(body, `href="/ciderui/`)
+	if start < 0 {
+		t.Fatalf("page links no ciderui stylesheet:\n%s", body)
+	}
+	href := body[start+len(`href="`):]
+	href = href[:strings.Index(href, `"`)]
+	resp, err := http.Get(srv.URL + href)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/css") {
+		t.Fatalf("GET %s = %d %q, want 200 text/css", href, resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
 }
 

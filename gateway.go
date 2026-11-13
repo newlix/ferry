@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/at-least/ciderui"
 )
 
 // maxRequestBody bounds how much of a client request is buffered for model
@@ -67,6 +69,7 @@ type Gateway struct {
 	sticky     stickySessions
 	usage      *usageMonitor
 	refreshing atomic.Bool
+	assets     http.Handler // the home page's stylesheet and fonts
 	log        Logger
 }
 
@@ -76,6 +79,7 @@ func NewGateway(cfg Config, log Logger) *Gateway {
 		client: &http.Client{},
 		usage:  newUsageMonitor(cfg.Upstreams.Usage, log),
 		log:    log,
+		assets: ciderui.Assets(),
 	}
 	g.routes = []route{
 		{http.MethodGet, "/", g.handleHome},
@@ -127,6 +131,10 @@ func (g *Gateway) StartUsageLoop(ctx context.Context) {
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, ciderui.AssetsPath) {
+		g.assets.ServeHTTP(w, r)
+		return
+	}
 	for _, rt := range g.routes {
 		if r.URL.Path != rt.path {
 			continue

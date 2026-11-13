@@ -4,7 +4,10 @@ go 1.27.3
 
 tool honnef.co/go/tools/cmd/staticcheck
 
-require maragu.dev/gomponents v1.4.0
+require (
+	github.com/at-least/ciderui v0.0.0-20261113200616-a303daa314b4
+	maragu.dev/gomponents v1.4.0
+)
 
 require (
 	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c // indirect
