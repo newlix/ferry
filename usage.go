@@ -112,7 +112,10 @@ func (m *usageMonitor) fetchQuota(key string, u *keyUsage) error {
 			continue
 		}
 		rem := (l.Usage - l.Current) / l.Usage
-		reset := time.UnixMilli(l.NextResetTime)
+		var reset time.Time // an untouched window omits nextResetTime
+		if l.NextResetTime != 0 {
+			reset = time.UnixMilli(l.NextResetTime)
+		}
 		switch l.Unit {
 		case 3:
 			u.sessionRem = rem

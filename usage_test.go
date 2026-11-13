@@ -333,3 +333,26 @@ func TestProxyAlternatesKeysWhenNoneIsRamping(t *testing.T) {
 		}
 	}
 }
+
+// An untouched 5-hour window comes back without nextResetTime (live, 2026-11-14):
+// its reset is unknown, not the Unix epoch.
+func TestUsageWindowWithoutResetTimeHasUnknownReset(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":200,"data":{"limits":[
+			{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":28000,"currentValue":0,"remaining":28000,"percentage":0},
+			{"type":"CREDIT_LIMIT","unit":6,"number":1,"usage":140000,"currentValue":6490,"nextResetTime":1795068517976}
+		]},"success":true}`)
+	}))
+	defer server.Close()
+	m := newUsageMonitor(server.URL, NewNullLogger())
+	var u keyUsage
+	if err := m.fetchQuota("k", &u); err != nil {
+		t.Fatal(err)
+	}
+	if !u.sessionReset.IsZero() {
+		t.Errorf("sessionReset = %v, want zero (unknown)", u.sessionReset)
+	}
+	if u.weeklyReset.IsZero() {
+		t.Error("weeklyReset is zero, want the reported time")
+	}
+}
