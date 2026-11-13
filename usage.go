@@ -153,17 +153,18 @@ func (m *usageMonitor) fetchQuota(key string, u *keyUsage) error {
 	return nil
 }
 
-// fetchPlan reads the VALID subscription. The paid period ends at
-// nextRenewTime ("2027-08-12"); on live data (2026-11-14) the "valid" field
-// instead names the following, not yet paid period (paymentType WAIT_PAY),
-// so it is not used.
+// fetchPlan reads the VALID subscription. Its "valid" field is the paid
+// subscription term, "2027-08-12 20:08:05-2028-08-12 20:08:05"; the plan
+// ends at the second timestamp (user, 2026-11-14). nextRenewTime and
+// currentRenewTime are not the term's end: on a yearly plan bought for a
+// year ahead they lag it by a year.
 func (m *usageMonitor) fetchPlan(key string, u *keyUsage) error {
 	var resp struct {
 		Data []struct {
-			ProductName   string `json:"productName"`
-			Status        string `json:"status"`
-			NextRenewTime string `json:"nextRenewTime"`
-			AutoRenew     int    `json:"autoRenew"`
+			ProductName string `json:"productName"`
+			Status      string `json:"status"`
+			Valid       string `json:"valid"`
+			AutoRenew   int    `json:"autoRenew"`
 		} `json:"data"`
 	}
 	if err := m.getJSON(usagePathSubscription, key, &resp); err != nil {
@@ -175,17 +176,30 @@ func (m *usageMonitor) fetchPlan(key string, u *keyUsage) error {
 		}
 		u.planName = s.ProductName
 		u.autoRenew = s.AutoRenew == 1
-		if s.NextRenewTime == "" {
+		if s.Valid == "" {
 			return nil
 		}
-		end, err := time.ParseInLocation(time.DateOnly, s.NextRenewTime, time.Local)
+		end, err := parseValidEnd(s.Valid)
 		if err != nil {
-			return fmt.Errorf("nextRenewTime: %w", err)
+			return err
 		}
 		u.planEnd = end
 		return nil
 	}
 	return nil
+}
+
+// parseValidEnd takes the end of a "valid" range: two time.DateTime
+// timestamps joined by "-" (each contains "-" itself, so it splits by length).
+func parseValidEnd(valid string) (time.Time, error) {
+	if len(valid) != 2*len(time.DateTime)+1 || valid[len(time.DateTime)] != '-' {
+		return time.Time{}, fmt.Errorf("valid %q: want \"<start>-<end>\" in %s", valid, time.DateTime)
+	}
+	end, err := time.ParseInLocation(time.DateTime, valid[len(time.DateTime)+1:], time.Local)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("valid %q: %w", valid, err)
+	}
+	return end, nil
 }
 
 // consoleError marks an endpoint reply the caller can act on: the console

@@ -43,7 +43,7 @@ func TestHomeShowsQuotaAndPlanEnd(t *testing.T) {
 		`class="fill low"`,
 		"90% left",
 		"Refills in 1h 59m",
-		"Ends Aug 12, 2027",
+		"Ends Aug 12, 2028",
 		"GLM Coding Pro",
 		srv.URL + "/v1",
 	} {

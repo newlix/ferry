@@ -96,7 +96,7 @@ func TestUsageFetchParsesConsoleShapes(t *testing.T) {
 		if u.planName != "GLM Coding Pro" {
 			t.Errorf("key %s: planName = %q, want GLM Coding Pro", k, u.planName)
 		}
-		if want := time.Date(2027, 8, 12, 0, 0, 0, 0, time.Local); !u.planEnd.Equal(want) || u.autoRenew {
+		if want := time.Date(2028, 8, 12, 20, 8, 5, 0, time.Local); !u.planEnd.Equal(want) || u.autoRenew {
 			t.Errorf("key %s: planEnd = %v autoRenew = %v, want %v false", k, u.planEnd, u.autoRenew, want)
 		}
 		if left := time.Until(u.weeklyReset); left < 4*24*time.Hour || left > 5*24*time.Hour+time.Minute {
