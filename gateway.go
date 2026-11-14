@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -175,10 +174,6 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 
 	obj := parseJSONObject(body)
 	requested, mapped, body := applyModelAlias(obj, body, g.cfg.Models)
-	if !slices.Contains(servedModels, mapped) {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("ferry serves only %s; this request asked for %q", strings.Join(servedModels, " and "), requested), u.anthropic)
-		return
-	}
 
 	target, err := url.Parse(u.base + u.path)
 	if err != nil {

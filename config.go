@@ -48,10 +48,6 @@ type apiKey struct {
 	Secret string
 }
 
-// servedModels are the only upstream models ferry sends a request to (user 2026-11-14: 「ferry 只支援 glm-5.3 跟
-// glm-5.3-flash 其他直接回傳錯誤」); a request for any other, or an alias to one, is refused.
-var servedModels = []string{"glm-5.3", "glm-5.3-flash"}
-
 func DefaultConfig() Config {
 	return Config{
 		Listen: defaultListen,
@@ -64,6 +60,7 @@ func DefaultConfig() Config {
 		Models: map[string]string{
 			"glm-5.3":       "glm-5.3",
 			"glm-5.3-flash": "glm-5.3-flash",
+			"glm-5.2":       "glm-5.2",
 		},
 	}
 }
@@ -102,9 +99,6 @@ func (c Config) validate() error {
 	for alias, target := range c.Models {
 		if alias == "" || target == "" {
 			return errors.New("config: models must map non-empty names to non-empty models")
-		}
-		if !slices.Contains(servedModels, target) {
-			return fmt.Errorf("config: models maps %q to %q; ferry serves only %s", alias, target, strings.Join(servedModels, " and "))
 		}
 	}
 	return nil
