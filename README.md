@@ -53,8 +53,7 @@ change. By default ferry is quiet — start it with `-v` to log every request.
       },
       "models": {
         "glm-5.3": { "name": "GLM-5.3" },
-        "glm-5.3-flash": { "name": "GLM-5.3 Flash" },
-        "glm-5.2": { "name": "GLM-5.2" }
+        "glm-5.3-flash": { "name": "GLM-5.3 Flash" }
       }
     }
   },
@@ -90,7 +89,7 @@ Optional file `~/.config/ferry/config.json` — everything has a default:
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `listen` | `127.0.0.1:8787` | Listen address; localhost only |
-| `models` | `glm-5.3`, `glm-5.3-flash`, `glm-5.2` | Alias → upstream model (merged with the defaults); unknown names pass through unchanged |
+| `models` | `glm-5.3`, `glm-5.3-flash` | Alias → upstream model (merged with the defaults); an alias must name one of the two |
 
 The one config most tools need is an alias, so a client-baked model name
 reaches a real model:
@@ -98,6 +97,9 @@ reaches a real model:
 ```jsonc
 {"models": {"claude-sonnet-4-5": "glm-5.3"}}
 ```
+
+ferry serves glm-5.3 and glm-5.3-flash alone: a request for any other model,
+or naming none, gets a 400 and reaches no key.
 
 Keys live in the Keychain, never in this file; a config that still carries
 `apiKeys` or `upstreams` from an older ferry fails loudly with a hint.

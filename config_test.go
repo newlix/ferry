@@ -48,8 +48,18 @@ func TestLoadConfigOverridesAndMergesModels(t *testing.T) {
 			t.Errorf("Models[%q] = %q, want %q", alias, cfg.Models[alias], target)
 		}
 	}
-	if !slices.Equal(cfg.ModelNames(), []string{"fast", "glm-5.2", "glm-5.3", "glm-5.3-flash"}) {
+	if !slices.Equal(cfg.ModelNames(), []string{"fast", "glm-5.3", "glm-5.3-flash"}) {
 		t.Errorf("ModelNames = %v", cfg.ModelNames())
+	}
+}
+
+func TestLoadConfigRejectsAnAliasToAModelNotServed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"models": {"old": "glm-5.2"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "glm-5.2") {
+		t.Fatalf("LoadConfig = %v, want an error naming glm-5.2", err)
 	}
 }
 

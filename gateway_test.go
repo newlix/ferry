@@ -310,6 +310,34 @@ func TestGatewayNeedsNoClientAuth(t *testing.T) {
 	}
 }
 
+// a model ferry does not serve, or none, is refused before any key is used, in the route's own error shape
+func TestProxyRefusesAModelNotServed(t *testing.T) {
+	upstream, requests := runUpstream(t, http.StatusOK, `{}`)
+	srv, _ := newTestGateway(t, func(c *Config) {
+		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
+	})
+	for _, tt := range []struct{ route, body, want string }{
+		{"/v1/chat/completions", `{"model":"glm-5.2"}`, `{"error":{"message":"ferry serves only glm-5.3 and glm-5.3-flash; this request asked for \"glm-5.2\""}}`},
+		{"/v1/messages", `{"model":"claude-sonnet-4-5"}`, `{"error":{"message":"ferry serves only glm-5.3 and glm-5.3-flash; this request asked for \"claude-sonnet-4-5\"","type":"gateway_error"},"type":"error"}`},
+		{"/v1/responses", `{"input":"hi"}`, `{"error":{"message":"ferry serves only glm-5.3 and glm-5.3-flash; this request asked for \"\""}}`},
+	} {
+		resp := postJSON(t, srv.URL+tt.route, nil, tt.body)
+		got, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusBadRequest || strings.TrimSpace(string(got)) != tt.want {
+			t.Errorf("%s %s: %d %s, want 400 %s", tt.route, tt.body, resp.StatusCode, got, tt.want)
+		}
+	}
+	select {
+	case r := <-requests:
+		t.Errorf("a refused request reached upstream: %s", r.body)
+	default:
+	}
+}
+
 func TestModelsAndHealthAndUnknownRoutes(t *testing.T) {
 	srv, _ := newTestGateway(t, nil)
 
@@ -339,10 +367,8 @@ func TestModelsAndHealthAndUnknownRoutes(t *testing.T) {
 	for _, m := range list.Data {
 		ids[m.ID] = true
 	}
-	for _, want := range []string{"glm-5.3", "glm-5.3-flash", "glm-5.2"} {
-		if !ids[want] {
-			t.Errorf("/v1/models missing %q, got %v", want, ids)
-		}
+	if len(ids) != 2 || !ids["glm-5.3"] || !ids["glm-5.3-flash"] {
+		t.Errorf("/v1/models = %v, want glm-5.3 and glm-5.3-flash alone", ids)
 	}
 
 	resp, err = http.Get(srv.URL + "/v1/chat/completions")
