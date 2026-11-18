@@ -91,6 +91,7 @@ Optional file `~/.config/ferry/config.json` — everything has a default:
 | --- | --- | --- |
 | `listen` | `127.0.0.1:8787` | Listen address; localhost only |
 | `models` | `glm-5.3`, `glm-5.3-flash`, `glm-5.2` | Alias → upstream model (merged with the defaults); unknown names pass through unchanged |
+| `retryWait` | `"5m"` (0 disables) | How long a request is held and retried when EVERY key answers 401/403/429. z.ai's request rate limit (code 1302) is a short-window throttle that clears in seconds to minutes, and agent clients kill a whole run on one 429 — holding turns a dead run into a pause. When the deadline passes the last failover response is forwarded unchanged. Accepts a Go duration string or seconds. |
 
 The one config most tools need is an alias, so a client-baked model name
 reaches a real model:
@@ -129,7 +130,13 @@ Keys live in the Keychain, never in this file; a config that still carries
   of piling onto one key's rate limit.
 - Quiet output is the product; `-v` adds one line per request (path, model
   alias→target, key name, conversation hash, status, bytes, duration). Key
-  rotations and quota fetch failures always print. Key material never
-  appears in logs.
+  rotations, quota fetch failures and held requests always print. Key
+  material never appears in logs.
+- When every key answers a failover status in one sweep, the request is
+  held and the sweep retried with backoff until `retryWait` (5m default).
+  Live incident that shaped this (2026-11-18): one key weekly-exhausted
+  (1310), the other tripping the short-window request limit (1302) under
+  parallel agent load — a retry seconds later succeeds, so ferry waits
+  instead of handing the 429 to a client that would abort its whole run.
 - Gateway-generated errors use the shape of the protocol on that route
   (Anthropic `type: "error"` on `/v1/messages`, OpenAI `error` elsewhere).

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 const (
@@ -17,6 +18,13 @@ const (
 	defaultUpstreamResponses = "https://api.z.ai/api/v1"
 	defaultUpstreamAnthropic = "https://api.z.ai/api/anthropic"
 	defaultUpstreamUsage     = "https://api.z.ai"
+
+	// defaultRetryWait: the z.ai request rate limit observed on live Max
+	// plans (code 1302, 2026-11) clears within seconds to minutes; a held
+	// request that outlives it beats a failed agent run. Requests whose
+	// every key is weekly-exhausted hold for this long too, then still get
+	// the honest 429.
+	defaultRetryWait = 5 * time.Minute
 )
 
 // A coding-plan key is accepted only on the coding endpoints below, not on
@@ -30,15 +38,49 @@ type Upstreams struct {
 }
 
 // Config is the on-disk config file plus runtime-only fields. The file holds
-// just listen and models; keys come from the key store, upstreams are fixed.
-// The runtime fields carry json:"-" so a legacy config spelling them is an
-// unknown field and fails loudly instead of silently loading.
+// listen, models and retryWait; keys come from the key store, upstreams are
+// fixed. The runtime fields carry json:"-" so a legacy config spelling them
+// is an unknown field and fails loudly instead of silently loading.
 type Config struct {
 	Listen string            `json:"listen"`
 	Models map[string]string `json:"models"`
+	// RetryWait caps how long a request is held and retried when every key
+	// returned a failover status (401/403/429); 0 disables holding. See the
+	// retry loop in gateway.go.
+	RetryWait Duration `json:"retryWait"`
 
 	APIKeys   []apiKey  `json:"-"`
 	Upstreams Upstreams `json:"-"`
+}
+
+// Duration is time.Duration with a JSON form: a number is seconds, a string
+// is a Go duration ("5m", "300ms", "0"). encoding/json has no native
+// duration encoding, and "5m" beats asking users to compute seconds.
+type Duration time.Duration
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return fmt.Errorf("duration %s: %w", b, err)
+		}
+		v, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("duration %q: %w", s, err)
+		}
+		*d = Duration(v)
+		return nil
+	}
+	var secs float64
+	if err := json.Unmarshal(b, &secs); err != nil {
+		return fmt.Errorf("duration %s: %w", b, err)
+	}
+	*d = Duration(time.Duration(secs * float64(time.Second)))
+	return nil
+}
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
 }
 
 // apiKey pairs a key's store name with its secret: status and logs show the
@@ -50,7 +92,8 @@ type apiKey struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Listen: defaultListen,
+		Listen:    defaultListen,
+		RetryWait: Duration(defaultRetryWait),
 		Upstreams: Upstreams{
 			OpenAIChat:      defaultUpstreamOpenAI,
 			OpenAIResponses: defaultUpstreamResponses,
@@ -95,6 +138,9 @@ func LoadConfig(path string) (Config, error) {
 func (c Config) validate() error {
 	if c.Listen == "" {
 		return errors.New("config: listen must not be empty")
+	}
+	if c.RetryWait < 0 {
+		return errors.New("config: retryWait must not be negative (0 disables holding)")
 	}
 	for alias, target := range c.Models {
 		if alias == "" || target == "" {

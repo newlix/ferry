@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -182,59 +183,45 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	}
 	target.RawQuery = r.URL.RawQuery
 
-	// Key order comes from quota data (see usageMonitor.candidateOrder):
-	// smooth weighted round-robin over the usable keys — equal weights, so
-	// traffic spreads evenly, unless a key nears plan expiry and its weight
-	// ramps up gradually. Exhausted or expired keys are tried last. A
-	// conversation with a stable message prefix sticks to its key while that
-	// key is still usable (prompt-cache friendly on multi-account setups);
-	// the failover loop below rebinds it. A retry happens only while nothing
-	// has been written to the client yet, which is always the case here: the
-	// response body is forwarded only after the loop picked the final
-	// response.
-	order := g.usage.candidateOrder(len(g.cfg.APIKeys), start)
+	// Conversation identity for the sticky binding: a stable message prefix
+	// (the system prompt for coding agents) is the only element guaranteed
+	// identical across turns.
 	sessionID := uint64(0)
 	if len(g.cfg.APIKeys) > 1 && r.Header.Get(stickyHeader) != stickyOff {
 		sessionID = affinityID(obj, mapped)
-		if sessionID != 0 {
-			if k := g.sticky.get(sessionID, start); k >= 0 && g.usage.usable(k) {
-				rest := make([]int, 0, len(order)-1)
-				for _, idx := range order {
-					if idx != k {
-						rest = append(rest, idx)
-					}
-				}
-				order = append([]int{k}, rest...)
-			}
-		}
 	}
-	var resp *http.Response
-	keyIdx := order[0]
-	for i, idx := range order {
-		keyIdx = idx
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
-		if err != nil {
-			writeError(w, http.StatusBadGateway, fmt.Sprintf("build upstream request: %v", err), u.anthropic)
-			return
-		}
-		copyForwardedHeaders(req.Header, r.Header)
-		setUpstreamAuth(req.Header, u, g.cfg.APIKeys[keyIdx].Secret)
 
-		resp, err = g.client.Do(req)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, fmt.Sprintf("could not reach z.ai: %v", err), u.anthropic)
-			g.log.Verbose.Printf("%s %s model=%s key=%s status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), g.cfg.APIKeys[keyIdx].Name, time.Since(start).Round(time.Millisecond), err)
+	// One pass over the keys; when every key answers with a failover status,
+	// hold the request and sweep again until RetryWait (default 5m) or
+	// success. The z.ai request rate limit (code 1302) is a short-window
+	// throttle that clears in seconds to minutes, and agent clients kill a
+	// whole run on any 429 — holding here turns a dead run into a short
+	// pause. When the deadline passes, the last failover response is
+	// forwarded unchanged.
+	var resp *http.Response
+	keyIdx := 0
+	for attempt := 0; ; attempt++ {
+		var ok bool
+		resp, keyIdx, ok = g.sweep(w, r, u, target, body, obj, requested, mapped, sessionID, start)
+		if !ok {
 			return
 		}
-		if !failoverStatus(resp.StatusCode) || i == len(order)-1 {
+		if !failoverStatus(resp.StatusCode) {
 			break
 		}
-		reason := peekError(resp.Body)
-		resp.Body.Close()
-		next := order[(i+1)%len(order)]
-		g.log.Quiet.Printf("%s %s model=%s key=%s status=%d, trying key %s: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), g.cfg.APIKeys[keyIdx].Name, resp.StatusCode, g.cfg.APIKeys[next].Name, reason)
-		// The cached quota data said this key had room; refetch it.
-		g.refreshUsageAsync()
+		wait, more := g.holdDuration(attempt, resp, start)
+		if !more {
+			break
+		}
+		g.log.Quiet.Printf("%s %s model=%s all keys rate-limited (status %d), holding request for %s", r.Method, r.URL.Path, modelLabel(requested, mapped), resp.StatusCode, wait.Round(time.Millisecond))
+		select {
+		case <-r.Context().Done():
+			g.log.Quiet.Printf("%s %s: client gave up while every key was rate-limited", r.Method, r.URL.Path)
+			return
+		case <-time.After(wait):
+		}
+		// Synchronous so the next sweep orders keys by fresh quota data.
+		g.refreshUsage()
 	}
 	defer resp.Body.Close()
 
@@ -254,6 +241,101 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 		sessionLabel = fmt.Sprintf(" conv=%08x", sessionID)
 	}
 	g.log.Verbose.Printf("%s %s model=%s key=%s%s status=%d in=%dB out=%dB dur=%s", r.Method, r.URL.Path, modelLabel(requested, mapped), g.cfg.APIKeys[keyIdx].Name, sessionLabel, resp.StatusCode, len(body), out.n, time.Since(start).Round(time.Millisecond))
+}
+
+// sweep tries the key order once, replaying the buffered body. Key order
+// comes from quota data (see usageMonitor.candidateOrder): smooth weighted
+// round-robin over the usable keys — equal weights, so traffic spreads
+// evenly, unless a key nears plan expiry and its weight ramps up gradually.
+// Exhausted or expired keys are tried last. A conversation with a stable
+// message prefix sticks to its key while that key is still usable
+// (prompt-cache friendly on multi-account setups); rebinds happen after the
+// sweeps. ok=false means an error response was already written to w.
+func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, target *url.URL, body []byte, obj map[string]json.RawMessage, requested, mapped string, sessionID uint64, start time.Time) (*http.Response, int, bool) {
+	order := g.usage.candidateOrder(len(g.cfg.APIKeys), start)
+	if sessionID != 0 {
+		if k := g.sticky.get(sessionID, start); k >= 0 && g.usage.usable(k) {
+			rest := make([]int, 0, len(order)-1)
+			for _, idx := range order {
+				if idx != k {
+					rest = append(rest, idx)
+				}
+			}
+			order = append([]int{k}, rest...)
+		}
+	}
+	var resp *http.Response
+	keyIdx := order[0]
+	for i, idx := range order {
+		keyIdx = idx
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
+		if err != nil {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("build upstream request: %v", err), u.anthropic)
+			return nil, 0, false
+		}
+		copyForwardedHeaders(req.Header, r.Header)
+		setUpstreamAuth(req.Header, u, g.cfg.APIKeys[keyIdx].Secret)
+
+		resp, err = g.client.Do(req)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("could not reach z.ai: %v", err), u.anthropic)
+			g.log.Verbose.Printf("%s %s model=%s key=%s status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), g.cfg.APIKeys[keyIdx].Name, time.Since(start).Round(time.Millisecond), err)
+			return nil, 0, false
+		}
+		if !failoverStatus(resp.StatusCode) || i == len(order)-1 {
+			break
+		}
+		reason := peekError(resp.Body)
+		resp.Body.Close()
+		next := order[(i+1)%len(order)]
+		g.log.Quiet.Printf("%s %s model=%s key=%s status=%d, trying key %s: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), g.cfg.APIKeys[keyIdx].Name, resp.StatusCode, g.cfg.APIKeys[next].Name, reason)
+		// The cached quota data said this key had room; refetch it.
+		g.refreshUsageAsync()
+	}
+	return resp, keyIdx, true
+}
+
+// Retry hold: exponential backoff from retryBaseWait capped at
+// retryMaxWait, extended by a longer upstream Retry-After, clamped so the
+// last wake happens at the deadline. more=false sends the held response to
+// the client.
+const (
+	retryBaseWait = 5 * time.Second
+	retryMaxWait  = 60 * time.Second
+)
+
+func (g *Gateway) holdDuration(attempt int, resp *http.Response, start time.Time) (time.Duration, bool) {
+	deadline := start.Add(time.Duration(g.cfg.RetryWait))
+	wait := retryBaseWait << min(attempt, 8)
+	if wait > retryMaxWait || wait <= 0 {
+		wait = retryMaxWait
+	}
+	if ra := retryAfter(resp); ra > wait {
+		wait = ra
+	}
+	if now := time.Now(); now.Add(wait).After(deadline) {
+		wait = deadline.Sub(now)
+		if wait <= 0 {
+			return 0, false
+		}
+	}
+	return wait, true
+}
+
+// retryAfter reads a seconds- or date-form Retry-After header, capped at two
+// minutes (a longer one would outlive the hold anyway).
+func retryAfter(resp *http.Response) time.Duration {
+	v := resp.Header.Get("Retry-After")
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		return min(time.Duration(secs)*time.Second, 2*time.Minute)
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		return min(time.Until(t), 2*time.Minute)
+	}
+	return 0
 }
 
 func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {

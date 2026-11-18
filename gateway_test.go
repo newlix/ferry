@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -230,6 +231,7 @@ func TestProxyExhaustedKeysReturnsUpstreamError(t *testing.T) {
 	srv, _ := newTestGateway(t, func(c *Config) {
 		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
 		c.APIKeys = []apiKey{{Name: "key1", Secret: "k1"}}
+		c.RetryWait = 0 // disable holding: this test pins the pass-through
 	})
 
 	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
@@ -243,6 +245,68 @@ func TestProxyExhaustedKeysReturnsUpstreamError(t *testing.T) {
 	}
 	if !bytes.Contains(body, []byte("rate limited")) {
 		t.Errorf("body = %s, want upstream error body passed through", body)
+	}
+}
+
+func TestProxyHoldsRequestUntilAKeyRecovers(t *testing.T) {
+	// Both keys answer 429 on the first sweep; k2 recovers before the hold
+	// deadline, so the client sees 200 instead of the 429 that would kill an
+	// agent run. main's short-window 1302 and fool's weekly 1310 in one
+	// sweep is the live incident this reproduces (2026-11-18).
+	var k2Calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") != "Bearer k2" {
+			// k1 is the live main-key stand-in: its short-window rate limit
+			// never clears within the test.
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+			return
+		}
+		if k2Calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+			return
+		}
+		w.Write([]byte(`{"id":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	srv, _ := newTestGateway(t, func(c *Config) {
+		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
+		c.RetryWait = Duration(3 * time.Second) // short deadline: the first backoff is clamped to it
+	})
+
+	began := time.Now()
+	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 after the held retry (body: %s)", resp.StatusCode, body)
+	}
+	if elapsed := time.Since(began); elapsed < 2*time.Second {
+		t.Errorf("client waited %s, want the clamped hold (~3s) before the retry", elapsed.Round(time.Millisecond))
+	}
+	if k2Calls.Load() < 2 {
+		t.Errorf("k2 got %d calls, want >=2 (429, then the recovered retry)", k2Calls.Load())
+	}
+}
+
+func TestProxyHoldDeadlineForwardsLastResponse(t *testing.T) {
+	upstream, _ := runUpstream(t, http.StatusTooManyRequests, `{"error":{"message":"still limited"}}`)
+	srv, _ := newTestGateway(t, func(c *Config) {
+		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
+		c.RetryWait = Duration(time.Second)
+	})
+
+	began := time.Now()
+	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 forwarded after the deadline", resp.StatusCode)
+	}
+	if elapsed := time.Since(began); elapsed < time.Second {
+		t.Errorf("client waited %s, want the hold to run to the deadline", elapsed.Round(time.Millisecond))
 	}
 }
 
