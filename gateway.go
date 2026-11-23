@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -64,7 +65,9 @@ func NewNullLogger() Logger {
 }
 
 type Gateway struct {
+	mu         sync.RWMutex // guards cfg; Reload swaps it while requests are in flight
 	cfg        Config
+	store      KeyStore // re-read on Reload
 	routes     []route
 	client     *http.Client // no overall timeout: streams stay open as long as both sides do
 	sticky     stickySessions
@@ -74,9 +77,30 @@ type Gateway struct {
 	log        Logger
 }
 
-func NewGateway(cfg Config, log Logger) *Gateway {
+// config copies the current config; callers read fields from the copy, so a
+// concurrent Reload never shows them a half-swapped value.
+func (g *Gateway) config() Config {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.cfg
+}
+
+// routingLabel names the routing mode for logs: "automatic" or
+// "fixed to NAME".
+func (g *Gateway) routingLabel() string {
+	cfg := g.config()
+	if cfg.RouteIdx >= 0 {
+		return "fixed to " + cfg.APIKeys[cfg.RouteIdx].Name
+	}
+	return "automatic"
+}
+
+// NewGateway builds the gateway. store is kept for Reload; cfg.APIKeys must
+// already be loaded (loadKeys), which also resolved the route.
+func NewGateway(cfg Config, store KeyStore, log Logger) *Gateway {
 	g := &Gateway{
 		cfg:    cfg,
+		store:  store,
 		client: &http.Client{},
 		usage:  newUsageMonitor(cfg.Upstreams.Usage, log),
 		log:    log,
@@ -97,7 +121,7 @@ func NewGateway(cfg Config, log Logger) *Gateway {
 
 // refreshUsage synchronously refetches quota data for all keys.
 func (g *Gateway) refreshUsage() {
-	g.usage.refresh(g.cfg.APIKeys)
+	g.usage.refresh(g.config().APIKeys)
 }
 
 // refreshUsageAsync refetches quota data at most once at a time; the failover
@@ -125,10 +149,34 @@ func (g *Gateway) StartUsageLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				g.usage.refresh(g.cfg.APIKeys)
+				g.usage.refresh(g.config().APIKeys)
 			}
 		}
 	}()
+}
+
+// Reload re-reads the config file and the key store and swaps them in
+// without a restart: the SIGHUP handler calls it after ferry route or
+// ferry key changed the files. A listen change still needs a restart.
+// cfgPath is the config file to read.
+func (g *Gateway) Reload(cfgPath string) error {
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		return err
+	}
+	if err := loadKeys(&cfg, g.store); err != nil {
+		return err
+	}
+	// Key indexes shift with the store order, so index-keyed conversation
+	// bindings and cached usage start over; quota data refills within one
+	// refresh cycle.
+	g.sticky.reset()
+	g.usage.reset()
+	g.mu.Lock()
+	g.cfg = cfg
+	g.mu.Unlock()
+	g.refreshUsageAsync()
+	return nil
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +210,8 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	start := time.Now()
-	if len(g.cfg.APIKeys) == 0 {
+	cfg := g.config()
+	if len(cfg.APIKeys) == 0 {
 		writeError(w, http.StatusServiceUnavailable, "ferry has no keys; add one: ferry key add", u.anthropic)
 		return
 	}
@@ -174,7 +223,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	}
 
 	obj := parseJSONObject(body)
-	requested, mapped, body := applyModelAlias(obj, body, g.cfg.Models)
+	requested, mapped, body := applyModelAlias(obj, body, cfg.Models)
 
 	target, err := url.Parse(u.base + u.path)
 	if err != nil {
@@ -188,7 +237,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	// identical across turns. Pointless under fixed routing — every request
 	// already goes to the pinned key.
 	sessionID := uint64(0)
-	if g.cfg.RouteIdx < 0 && len(g.cfg.APIKeys) > 1 && r.Header.Get(stickyHeader) != stickyOff {
+	if cfg.RouteIdx < 0 && len(cfg.APIKeys) > 1 && r.Header.Get(stickyHeader) != stickyOff {
 		sessionID = affinityID(obj, mapped)
 	}
 
@@ -203,14 +252,14 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	keyIdx := 0
 	for attempt := 0; ; attempt++ {
 		var ok bool
-		resp, keyIdx, ok = g.sweep(w, r, u, target, body, obj, requested, mapped, sessionID, start)
+		resp, keyIdx, ok = g.sweep(w, r, u, target, body, obj, requested, mapped, sessionID, start, cfg)
 		if !ok {
 			return
 		}
 		if !failoverStatus(resp.StatusCode) {
 			break
 		}
-		wait, more := g.holdDuration(attempt, resp, start)
+		wait, more := g.holdDuration(attempt, resp, cfg, start)
 		if !more {
 			break
 		}
@@ -241,7 +290,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	if sessionID != 0 {
 		sessionLabel = fmt.Sprintf(" conv=%08x", sessionID)
 	}
-	g.log.Verbose.Printf("%s %s model=%s key=%s%s status=%d in=%dB out=%dB dur=%s", r.Method, r.URL.Path, modelLabel(requested, mapped), g.cfg.APIKeys[keyIdx].Name, sessionLabel, resp.StatusCode, len(body), out.n, time.Since(start).Round(time.Millisecond))
+	g.log.Verbose.Printf("%s %s model=%s key=%s%s status=%d in=%dB out=%dB dur=%s", r.Method, r.URL.Path, modelLabel(requested, mapped), cfg.APIKeys[keyIdx].Name, sessionLabel, resp.StatusCode, len(body), out.n, time.Since(start).Round(time.Millisecond))
 }
 
 // sweep tries the key order once, replaying the buffered body. Key order
@@ -251,16 +300,18 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 // Exhausted or expired keys are tried last. A conversation with a stable
 // message prefix sticks to its key while that key is still usable
 // (prompt-cache friendly on multi-account setups); rebinds happen after the
-// sweeps. ok=false means an error response was already written to w.
-func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, target *url.URL, body []byte, obj map[string]json.RawMessage, requested, mapped string, sessionID uint64, start time.Time) (*http.Response, int, bool) {
+// sweeps. cfg is the snapshot proxy read; a concurrent Reload finishes this
+// request on the old keys rather than mixing indexes from two configs.
+// ok=false means an error response was already written to w.
+func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, target *url.URL, body []byte, obj map[string]json.RawMessage, requested, mapped string, sessionID uint64, start time.Time, cfg Config) (*http.Response, int, bool) {
 	var order []int
-	if g.cfg.RouteIdx >= 0 {
+	if cfg.RouteIdx >= 0 {
 		// Fixed routing: the pinned key only. A failover status holds and
 		// retries that key (see the retry loop in proxy) instead of rotating
 		// to another key — the user chose this key.
-		order = []int{g.cfg.RouteIdx}
+		order = []int{cfg.RouteIdx}
 	} else {
-		order = g.usage.candidateOrder(len(g.cfg.APIKeys), start)
+		order = g.usage.candidateOrder(len(cfg.APIKeys), start)
 		if sessionID != 0 {
 			if k := g.sticky.get(sessionID, start); k >= 0 && g.usage.usable(k) {
 				rest := make([]int, 0, len(order)-1)
@@ -283,12 +334,12 @@ func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, targ
 			return nil, 0, false
 		}
 		copyForwardedHeaders(req.Header, r.Header)
-		setUpstreamAuth(req.Header, u, g.cfg.APIKeys[keyIdx].Secret)
+		setUpstreamAuth(req.Header, u, cfg.APIKeys[keyIdx].Secret)
 
 		resp, err = g.client.Do(req)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("could not reach z.ai: %v", err), u.anthropic)
-			g.log.Verbose.Printf("%s %s model=%s key=%s status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), g.cfg.APIKeys[keyIdx].Name, time.Since(start).Round(time.Millisecond), err)
+			g.log.Verbose.Printf("%s %s model=%s key=%s status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), cfg.APIKeys[keyIdx].Name, time.Since(start).Round(time.Millisecond), err)
 			return nil, 0, false
 		}
 		if !failoverStatus(resp.StatusCode) || i == len(order)-1 {
@@ -297,7 +348,7 @@ func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, targ
 		reason := peekError(resp.Body)
 		resp.Body.Close()
 		next := order[(i+1)%len(order)]
-		g.log.Quiet.Printf("%s %s model=%s key=%s status=%d, trying key %s: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), g.cfg.APIKeys[keyIdx].Name, resp.StatusCode, g.cfg.APIKeys[next].Name, reason)
+		g.log.Quiet.Printf("%s %s model=%s key=%s status=%d, trying key %s: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), cfg.APIKeys[keyIdx].Name, resp.StatusCode, cfg.APIKeys[next].Name, reason)
 		// The cached quota data said this key had room; refetch it.
 		g.refreshUsageAsync()
 	}
@@ -313,8 +364,8 @@ const (
 	retryMaxWait  = 60 * time.Second
 )
 
-func (g *Gateway) holdDuration(attempt int, resp *http.Response, start time.Time) (time.Duration, bool) {
-	deadline := start.Add(time.Duration(g.cfg.RetryWait))
+func (g *Gateway) holdDuration(attempt int, resp *http.Response, cfg Config, start time.Time) (time.Duration, bool) {
+	deadline := start.Add(time.Duration(cfg.RetryWait))
 	wait := retryBaseWait << min(attempt, 8)
 	if wait > retryMaxWait || wait <= 0 {
 		wait = retryMaxWait
@@ -348,7 +399,7 @@ func retryAfter(resp *http.Response) time.Duration {
 }
 
 func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
-	names := g.cfg.ModelNames()
+	names := g.config().ModelNames()
 	data := make([]map[string]string, 0, len(names))
 	for _, name := range names {
 		data = append(data, map[string]string{"id": name, "object": "model", "owned_by": "z-ai"})

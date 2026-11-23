@@ -21,15 +21,16 @@ const homeRefreshSeconds = 60
 const planEndingSoon = 30 * 24 * time.Hour
 
 func (gw *Gateway) handleHome(w http.ResponseWriter, r *http.Request) {
-	usage, known, refreshedAt := gw.usage.snapshot(len(gw.cfg.APIKeys))
+	cfg := gw.config()
+	usage, known, refreshedAt := gw.usage.snapshot(len(cfg.APIKeys))
 	page := homePage(homeData{
-		keys:        gw.cfg.APIKeys,
+		keys:        cfg.APIKeys,
 		usage:       usage,
 		known:       known,
 		refreshedAt: refreshedAt,
 		baseURL:     requestBaseURL(r) + "/v1",
-		models:      gw.cfg.ModelNames(),
-		route:       gw.cfg.Route,
+		models:      cfg.ModelNames(),
+		route:       cfg.Route,
 		now:         time.Now(),
 	})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -57,6 +57,14 @@ func (s *stickySessions) get(id uint64, now time.Time) int {
 	return b.key
 }
 
+// reset drops every binding: Reload shifts key indexes, so old bindings
+// would point at the wrong key. Conversations rebind on their next request.
+func (s *stickySessions) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bind = nil
+}
+
 func (s *stickySessions) put(id uint64, key int, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

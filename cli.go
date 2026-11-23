@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -146,7 +147,7 @@ func cmdKeyAdd(cfg Config, store KeyStore, in io.Reader, out io.Writer, suggestI
 		return err
 	}
 	fmt.Fprintf(out, "Added %q.\n", name)
-	applyKeyChange(out, suggestInstall)
+	applyKeyChange(cfg, out, suggestInstall)
 	return nil
 }
 
@@ -171,9 +172,10 @@ func cmdKeyRemove(store KeyStore, args []string) error {
 	if !slices.Contains(names, args[0]) {
 		return fmt.Errorf("no key named %q (see:  ferry status)", args[0])
 	}
-	// A load error leaves the question open; removal proceeds and the
+	// A load error leaves the route question open; removal proceeds and the
 	// startup route check fails loudly if the name really was pinned.
-	if cfg, err := LoadConfig(defaultConfigPath()); err == nil && cfg.Route == args[0] {
+	loaded, loadErr := LoadConfig(defaultConfigPath())
+	if loadErr == nil && loaded.Route == args[0] {
 		return fmt.Errorf("%q is the fixed route. Unpin first:  ferry route auto", args[0])
 	}
 	if serviceInstalled() && len(names) == 1 {
@@ -183,7 +185,11 @@ func cmdKeyRemove(store KeyStore, args []string) error {
 		return err
 	}
 	fmt.Printf("Removed %q.\n", args[0])
-	applyKeyChange(os.Stdout, false)
+	cfg := loaded
+	if loadErr != nil {
+		cfg = Config{Listen: defaultListen}
+	}
+	applyKeyChange(cfg, os.Stdout, false)
 	return nil
 }
 
@@ -228,10 +234,7 @@ func cmdRoute(cfg Config, store KeyStore, path string, args []string, out io.Wri
 	} else {
 		fmt.Fprintf(out, "Every request now uses %s.\n", name)
 	}
-	applyKeyChange(out, false)
-	if !serviceInstalled() && healthCheck(cfg.Listen) {
-		fmt.Fprintln(out, "ferry is running in another terminal; restart it to pick this up.")
-	}
+	applyKeyChange(cfg, out, false)
 	return nil
 }
 
@@ -315,23 +318,67 @@ func waitServiceGone(domain, label string, timeout time.Duration) {
 	}
 }
 
-// applyKeyChange restarts an installed ferry so a key or routing change
-// takes effect at once. suggestInstall is false on first run and after a
-// removal or route change: the install hint would interrupt the flow the
-// user is already in.
-func applyKeyChange(out io.Writer, suggestInstall bool) {
-	if !serviceInstalled() {
-		if suggestInstall {
-			fmt.Fprintln(out, "Not set to start at login. Set it with:  ferry install")
+// applyKeyChange makes a key or routing change reach the running ferry:
+// launchd restarts the service, everything else SIGHUPs the running process,
+// which re-reads config and keys (see serve's reload handler). suggestInstall
+// is false on first run and after a removal or route change: the install
+// hint would interrupt the flow the user is already in.
+func applyKeyChange(cfg Config, out io.Writer, suggestInstall bool) {
+	if serviceInstalled() {
+		uid := strconv.Itoa(os.Getuid())
+		if err := exec.Command(launchctlBin, "kickstart", "-k", "gui/"+uid+"/"+serviceLabel).Run(); err != nil {
+			fmt.Fprintf(out, "Could not restart ferry; the change takes effect at your next login (logs: %s)\n", filepath.Join(configDir(), "ferry.log"))
+			return
+		}
+		fmt.Fprintln(out, "Restarted ferry.")
+		return
+	}
+	if suggestInstall {
+		fmt.Fprintln(out, "Not set to start at login. Set it with:  ferry install")
+	}
+	reloadRunning(cfg, out)
+}
+
+// reloadRunning signals the ferry recorded in the pidfile. A missing or
+// stale pidfile — an older ferry, or one running elsewhere — keeps the
+// restart hint.
+func reloadRunning(cfg Config, out io.Writer) {
+	pid, ok := runningFerryPid()
+	if !ok {
+		if healthCheck(cfg.Listen) {
+			fmt.Fprintln(out, "ferry is running in another terminal; restart it to pick this up.")
 		}
 		return
 	}
-	uid := strconv.Itoa(os.Getuid())
-	if err := exec.Command(launchctlBin, "kickstart", "-k", "gui/"+uid+"/"+serviceLabel).Run(); err != nil {
-		fmt.Fprintf(out, "Could not restart ferry; the change takes effect at your next login (logs: %s)\n", filepath.Join(configDir(), "ferry.log"))
+	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+		fmt.Fprintln(out, "Could not signal the running ferry; restart it to pick this up.")
 		return
 	}
-	fmt.Fprintln(out, "Restarted ferry.")
+	fmt.Fprintf(out, "Signaled ferry (pid %d) to reload config and keys.\n", pid)
+}
+
+// runningFerryPid returns the pidfile pid when it still names a ferry
+// process, so a reused pid never receives our signal.
+func runningFerryPid() (int, bool) {
+	data, err := os.ReadFile(pidPath())
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	comm, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil || !strings.HasSuffix(strings.TrimSpace(string(comm)), serviceLabel) {
+		return 0, false
+	}
+	return pid, true
+}
+
+func pidPath() string { return filepath.Join(configDir(), "ferry.pid") }
+
+func writePidFile() error {
+	return os.WriteFile(pidPath(), []byte(strconv.Itoa(os.Getpid())), 0o644)
 }
 
 // serviceInstalled is a var so tests can pin the answer regardless of the

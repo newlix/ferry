@@ -69,8 +69,30 @@ func serve(cfg Config, log Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	gw := NewGateway(cfg, log)
+	store := NewKeyStore(configDir())
+	gw := NewGateway(cfg, store, log)
 	gw.StartUsageLoop(ctx)
+
+	if err := writePidFile(); err != nil {
+		log.Quiet.Printf("could not write %s: %v (ferry route and ferry key will not reload the running gateway)", pidPath(), err)
+	}
+	defer os.Remove(pidPath())
+
+	// SIGHUP re-reads the config file and the key store without a restart:
+	// applyKeyChange sends it after ferry route and ferry key. systemd and
+	// foreground runs reload here; launchd restarts instead.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for range hup {
+			if err := gw.Reload(defaultConfigPath()); err != nil {
+				log.Quiet.Printf("reload failed, keeping the previous config: %v", err)
+				continue
+			}
+			log.Quiet.Printf("reloaded config and keys (%s)", gw.routingLabel())
+		}
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

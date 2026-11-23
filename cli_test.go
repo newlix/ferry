@@ -16,6 +16,7 @@ func TestCmdKeyAddSavesVerifiedKey(t *testing.T) {
 	store := &fileStore{dir: dir}
 	cfg := DefaultConfig()
 	cfg.Upstreams.Usage = stub.server.URL
+	pinNoRunningFerry(t)
 	pinServiceInstalled(t, false)
 
 	var out bytes.Buffer
@@ -42,6 +43,7 @@ func TestCmdKeyAddRejectsKeyZaiRefuses(t *testing.T) {
 	store := &fileStore{dir: t.TempDir()}
 	cfg := DefaultConfig()
 	cfg.Upstreams.Usage = stub.server.URL
+	pinNoRunningFerry(t)
 	pinServiceInstalled(t, false)
 
 	var out bytes.Buffer
@@ -63,6 +65,7 @@ func TestCmdKeyAddSavesUnverifiableKeyWithWarning(t *testing.T) {
 	store := &fileStore{dir: t.TempDir()}
 	cfg := DefaultConfig()
 	cfg.Upstreams.Usage = stub.server.URL
+	pinNoRunningFerry(t)
 	pinServiceInstalled(t, false)
 
 	var out bytes.Buffer
@@ -100,6 +103,7 @@ func TestCmdInstallRefusesWithoutKeys(t *testing.T) {
 }
 
 func TestCmdRoute(t *testing.T) {
+	pinNoRunningFerry(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	store := &fileStore{dir: dir}
@@ -271,6 +275,7 @@ func TestPlistContent(t *testing.T) {
 }
 
 func TestServePortInUse(t *testing.T) {
+	pinNoRunningFerry(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -290,4 +295,11 @@ func pinServiceInstalled(t *testing.T, installed bool) {
 	original := serviceInstalled
 	serviceInstalled = func() bool { return installed }
 	t.Cleanup(func() { serviceInstalled = original })
+}
+
+// pinNoRunningFerry points the pidfile at an empty dir, so a test exercising
+// applyKeyChange can never signal the machine's real ferry.
+func pinNoRunningFerry(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 }

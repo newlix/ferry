@@ -89,6 +89,17 @@ func (m *usageMonitor) snapshot(n int) (usage []keyUsage, known []bool, refreshe
 	return usage, known, m.refreshedAt
 }
 
+// reset drops the cached usage and the round-robin state: Reload shifts key
+// indexes, so entries keyed by the old indexes would misreport. The next
+// refresh (started by Reload itself) rebuilds them.
+func (m *usageMonitor) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state = map[int]keyUsage{}
+	m.cw = nil
+	m.refreshedAt = time.Time{}
+}
+
 func (m *usageMonitor) fetchKey(key string) (keyUsage, error) {
 	u := keyUsage{sessionRem: 1, weeklyRem: 1}
 	if err := m.fetchQuota(key, &u); err != nil {

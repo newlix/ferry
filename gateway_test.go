@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -78,7 +79,7 @@ func newTestGateway(t *testing.T, mutate func(*Config)) (*httptest.Server, *Gate
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	gw := NewGateway(cfg, NewNullLogger())
+	gw := NewGateway(cfg, &fileStore{dir: t.TempDir()}, NewNullLogger())
 	srv := httptest.NewServer(gw)
 	t.Cleanup(srv.Close)
 	return srv, gw
@@ -258,6 +259,51 @@ func TestFixedRoutePinsOneKey(t *testing.T) {
 	case up := <-requests:
 		t.Fatalf("unexpected extra upstream request with %s", up.auth)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// Reload must apply a route change to the running gateway: pinning a key in
+// the config file takes over without a restart.
+func TestReloadAppliesRouteChange(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	store := &fileStore{dir: dir}
+	if err := store.Add("key1", "k1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add("key2", "k2"); err != nil {
+		t.Fatal(err)
+	}
+	upstream, requests := runUpstream(t, http.StatusOK, `{"id":"ok"}`)
+	cfg := DefaultConfig()
+	cfg.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
+	if err := loadKeys(&cfg, store); err != nil {
+		t.Fatal(err)
+	}
+	gw := NewGateway(cfg, store, NewNullLogger())
+	srv := httptest.NewServer(gw)
+	t.Cleanup(srv.Close)
+
+	post := func() string {
+		resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		return expectRequest(t, requests).auth
+	}
+	if auth := post(); auth != "Bearer k1" {
+		t.Fatalf("before reload: %q, want Bearer k1", auth)
+	}
+
+	if err := writeRoute(cfgPath, "key2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Reload(cfgPath); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if auth := post(); auth != "Bearer k2" {
+		t.Fatalf("after reload: %q, want Bearer k2 (fixed routing applied live)", auth)
 	}
 }
 

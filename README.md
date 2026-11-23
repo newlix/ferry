@@ -35,8 +35,11 @@ ferry install    # start at login (logs: ~/.config/ferry/ferry.log)
 Keys are verified when added (plan name, quota, expiry are fetched and
 shown) and stored in the macOS Keychain; on other systems they fall back to
 `~/.config/ferry/keys.json` (0600). `ferry key add` and `ferry key remove NAME`
-manage them (`ferry status` lists them); ferry restarts itself after a key
-change. By default ferry is quiet — start it with `-v` to log every request.
+manage them (`ferry status` lists them). After a key or routing change the
+running ferry picks it up at once: launchd restarts the service, and
+everywhere else `ferry` SIGHUPs the running process, which re-reads the
+config file and key store without dropping a request. By default ferry is
+quiet — start it with `-v` to log every request.
 
 ## opencode
 
