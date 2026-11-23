@@ -48,7 +48,14 @@ type Config struct {
 	// returned a failover status (401/403/429); 0 disables holding. See the
 	// retry loop in gateway.go.
 	RetryWait Duration `json:"retryWait"`
+	// Route pins every request to the key named here; empty routes
+	// automatically (weighted round-robin, sticky conversations, failover).
+	// loadKeys resolves it into RouteIdx and fails when no stored key has
+	// the name, so a stale name breaks at startup, not per request.
+	Route string `json:"route"`
 
+	// RouteIdx indexes APIKeys for fixed routing; -1 routes automatically.
+	RouteIdx  int       `json:"-"`
 	APIKeys   []apiKey  `json:"-"`
 	Upstreams Upstreams `json:"-"`
 }
@@ -94,6 +101,7 @@ func DefaultConfig() Config {
 	return Config{
 		Listen:    defaultListen,
 		RetryWait: Duration(defaultRetryWait),
+		RouteIdx:  -1,
 		Upstreams: Upstreams{
 			OpenAIChat:      defaultUpstreamOpenAI,
 			OpenAIResponses: defaultUpstreamResponses,
@@ -125,7 +133,7 @@ func LoadConfig(path string) (Config, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		if strings.Contains(err.Error(), "unknown field") {
-			return Config{}, fmt.Errorf("parse %s: %w (the file holds only \"listen\" and \"models\"; keys now live in the key store: ferry key add)", path, err)
+			return Config{}, fmt.Errorf("parse %s: %w (the file holds only \"listen\", \"models\", \"retryWait\" and \"route\"; keys now live in the key store: ferry key add)", path, err)
 		}
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}

@@ -185,9 +185,10 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 
 	// Conversation identity for the sticky binding: a stable message prefix
 	// (the system prompt for coding agents) is the only element guaranteed
-	// identical across turns.
+	// identical across turns. Pointless under fixed routing — every request
+	// already goes to the pinned key.
 	sessionID := uint64(0)
-	if len(g.cfg.APIKeys) > 1 && r.Header.Get(stickyHeader) != stickyOff {
+	if g.cfg.RouteIdx < 0 && len(g.cfg.APIKeys) > 1 && r.Header.Get(stickyHeader) != stickyOff {
 		sessionID = affinityID(obj, mapped)
 	}
 
@@ -252,16 +253,24 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 // (prompt-cache friendly on multi-account setups); rebinds happen after the
 // sweeps. ok=false means an error response was already written to w.
 func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, target *url.URL, body []byte, obj map[string]json.RawMessage, requested, mapped string, sessionID uint64, start time.Time) (*http.Response, int, bool) {
-	order := g.usage.candidateOrder(len(g.cfg.APIKeys), start)
-	if sessionID != 0 {
-		if k := g.sticky.get(sessionID, start); k >= 0 && g.usage.usable(k) {
-			rest := make([]int, 0, len(order)-1)
-			for _, idx := range order {
-				if idx != k {
-					rest = append(rest, idx)
+	var order []int
+	if g.cfg.RouteIdx >= 0 {
+		// Fixed routing: the pinned key only. A failover status holds and
+		// retries that key (see the retry loop in proxy) instead of rotating
+		// to another key — the user chose this key.
+		order = []int{g.cfg.RouteIdx}
+	} else {
+		order = g.usage.candidateOrder(len(g.cfg.APIKeys), start)
+		if sessionID != 0 {
+			if k := g.sticky.get(sessionID, start); k >= 0 && g.usage.usable(k) {
+				rest := make([]int, 0, len(order)-1)
+				for _, idx := range order {
+					if idx != k {
+						rest = append(rest, idx)
+					}
 				}
+				order = append([]int{k}, rest...)
 			}
-			order = append([]int{k}, rest...)
 		}
 	}
 	var resp *http.Response

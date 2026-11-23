@@ -22,6 +22,24 @@ func TestLoadConfigMissingFileGivesDefaults(t *testing.T) {
 	if cfg.Models["glm-5.3"] != "glm-5.3" {
 		t.Errorf("Models = %v, want defaults", cfg.Models)
 	}
+	if cfg.Route != "" || cfg.RouteIdx != -1 {
+		t.Errorf("Route = %q, RouteIdx = %d, want automatic routing", cfg.Route, cfg.RouteIdx)
+	}
+}
+
+func TestLoadConfigRoute(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	err := os.WriteFile(path, []byte(`{"route": "key2"}`), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Route != "key2" {
+		t.Errorf("Route = %q, want key2", cfg.Route)
+	}
 }
 
 func TestLoadConfigOverridesAndMergesModels(t *testing.T) {

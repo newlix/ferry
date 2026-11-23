@@ -28,6 +28,9 @@ func cmdStatus(cfg Config, store KeyStore, out io.Writer) error {
 	case !serviceInstalled() && !running:
 		line += " (ferry install starts it at login)"
 	}
+	if cfg.Route != "" {
+		line += " · fixed to " + cfg.Route
+	}
 	fmt.Fprintf(out, "%s\n\n", line)
 
 	names, err := store.Names()

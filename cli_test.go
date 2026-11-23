@@ -98,6 +98,33 @@ func TestCmdInstallRefusesWithoutKeys(t *testing.T) {
 	}
 }
 
+func TestResolveRoute(t *testing.T) {
+	cfg := Config{APIKeys: []apiKey{{Name: "key1"}, {Name: "key2"}}}
+	if err := resolveRoute(&cfg); err != nil {
+		t.Fatalf("resolveRoute empty: %v", err)
+	}
+	if cfg.RouteIdx != -1 {
+		t.Errorf("RouteIdx = %d, want -1 (automatic)", cfg.RouteIdx)
+	}
+
+	cfg.Route = "key2"
+	if err := resolveRoute(&cfg); err != nil {
+		t.Fatalf("resolveRoute key2: %v", err)
+	}
+	if cfg.RouteIdx != 1 {
+		t.Errorf("RouteIdx = %d, want 1", cfg.RouteIdx)
+	}
+
+	cfg.Route = "gone"
+	err := resolveRoute(&cfg)
+	if err == nil {
+		t.Fatal("unknown route name accepted, want error")
+	}
+	if !strings.Contains(err.Error(), "ferry status") {
+		t.Errorf("error = %v, want it to point at ferry status", err)
+	}
+}
+
 func TestPromptDefault(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader("myname\n"))
 	if got := promptDefault(r, &bytes.Buffer{}, "Name this key", "key1"); got != "myname" {

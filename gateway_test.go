@@ -226,6 +226,66 @@ func TestProxyFailsOverOnRateLimit(t *testing.T) {
 	}
 }
 
+// fixedRoute pins a test gateway's routing to key2, the way loadKeys does.
+func fixedRoute(c *Config) {
+	c.Route = "key2"
+	if err := resolveRoute(c); err != nil {
+		panic(err)
+	}
+}
+
+func TestFixedRoutePinsOneKey(t *testing.T) {
+	upstream, requests := runUpstream(t, http.StatusOK, `{"id":"ok"}`)
+	srv, _ := newTestGateway(t, func(c *Config) {
+		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
+		fixedRoute(c)
+	})
+
+	in := `{"model":"glm-5.3"}`
+	for range 3 {
+		resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, in)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+	}
+	for range 3 {
+		if up := expectRequest(t, requests); up.auth != "Bearer k2" {
+			t.Fatalf("upstream Authorization = %q, want Bearer k2 (fixed routing)", up.auth)
+		}
+	}
+	select {
+	case up := <-requests:
+		t.Fatalf("unexpected extra upstream request with %s", up.auth)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// Fixed routing never rotates: the pinned key's 429 forwards after the hold
+// deadline instead of trying another key.
+func TestFixedRouteDoesNotRotateOnRateLimit(t *testing.T) {
+	upstream, requests := runUpstream(t, http.StatusTooManyRequests, `{"error":{"message":"rate limited"}}`)
+	srv, _ := newTestGateway(t, func(c *Config) {
+		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
+		c.RetryWait = 0 // no holding: the 429 forwards at once
+		fixedRoute(c)
+	})
+
+	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want the pinned key's 429 forwarded", resp.StatusCode)
+	}
+	if up := expectRequest(t, requests); up.auth != "Bearer k2" {
+		t.Fatalf("upstream Authorization = %q, want Bearer k2", up.auth)
+	}
+	select {
+	case up := <-requests:
+		t.Fatalf("rotated to another key: %s", up.auth)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestProxyExhaustedKeysReturnsUpstreamError(t *testing.T) {
 	upstream, _ := runUpstream(t, http.StatusTooManyRequests, `{"error":{"message":"rate limited"}}`)
 	srv, _ := newTestGateway(t, func(c *Config) {

@@ -17,6 +17,7 @@ ferry (127.0.0.1:8787)
         │  Authorization: Bearer <coding-plan key>
         │  key order: smooth weighted round-robin; keys about to lose unused weekly quota gain weight
         │  one conversation → one key (sticky); 401/403/429 → next key + rebind
+        │  (`route` in config.json pins every request to one key instead)
         ▼
 api.z.ai coding endpoints
 ```
@@ -92,6 +93,7 @@ Optional file `~/.config/ferry/config.json` — everything has a default:
 | `listen` | `127.0.0.1:8787` | Listen address; localhost only |
 | `models` | `glm-5.3`, `glm-5.3-flash`, `glm-5.2` | Alias → upstream model (merged with the defaults); unknown names pass through unchanged |
 | `retryWait` | `"5m"` (0 disables) | How long a request is held and retried when EVERY key answers 401/403/429. z.ai's request rate limit (code 1302) is a short-window throttle that clears in seconds to minutes, and agent clients kill a whole run on one 429 — holding turns a dead run into a pause. When the deadline passes the last failover response is forwarded unchanged. Accepts a Go duration string or seconds. |
+| `route` | unset (automatic) | Name of one stored key (`ferry status` lists them); every request uses that key and never rotates to another — a 401/403/429 holds and retries it per `retryWait`. A name that is not in the key store fails at startup. Unset: automatic routing — weighted round-robin, sticky conversations, failover across keys. |
 
 The one config most tools need is an alias, so a client-baked model name
 reaches a real model:

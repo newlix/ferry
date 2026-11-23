@@ -89,7 +89,23 @@ func loadKeys(cfg *Config, store KeyStore) error {
 		}
 		cfg.APIKeys = append(cfg.APIKeys, apiKey{Name: name, Secret: secret})
 	}
-	return nil
+	return resolveRoute(cfg)
+}
+
+// resolveRoute turns cfg.Route into an index into cfg.APIKeys; an empty
+// Route means automatic routing.
+func resolveRoute(cfg *Config) error {
+	if cfg.Route == "" {
+		cfg.RouteIdx = -1
+		return nil
+	}
+	for i, k := range cfg.APIKeys {
+		if k.Name == cfg.Route {
+			cfg.RouteIdx = i
+			return nil
+		}
+	}
+	return fmt.Errorf("config: route %q names no key in the store (see: ferry status)", cfg.Route)
 }
 
 // cmdKeyAdd asks for the key first (what the user came holding) and the name

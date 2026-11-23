@@ -80,7 +80,11 @@ func serve(cfg Config, log Logger) error {
 	if n == 1 {
 		plural = ""
 	}
-	log.Quiet.Printf("ferry listening on http://%s (%d key%s)", cfg.Listen, n, plural)
+	routing := ""
+	if cfg.RouteIdx >= 0 {
+		routing = fmt.Sprintf(", fixed to %s", cfg.APIKeys[cfg.RouteIdx].Name)
+	}
+	log.Quiet.Printf("ferry listening on http://%s (%d key%s%s)", cfg.Listen, n, plural, routing)
 
 	select {
 	case err := <-serveErr:

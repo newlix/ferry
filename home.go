@@ -29,6 +29,7 @@ func (gw *Gateway) handleHome(w http.ResponseWriter, r *http.Request) {
 		refreshedAt: refreshedAt,
 		baseURL:     requestBaseURL(r) + "/v1",
 		models:      gw.cfg.ModelNames(),
+		route:       gw.cfg.Route,
 		now:         time.Now(),
 	})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -55,6 +56,7 @@ type homeData struct {
 	refreshedAt time.Time
 	baseURL     string
 	models      []string
+	route       string
 	now         time.Time
 }
 
@@ -94,6 +96,9 @@ func summaryLine(d homeData) string {
 	keys := fmt.Sprintf("%d keys", len(d.keys))
 	if len(d.keys) == 1 {
 		keys = "1 key"
+	}
+	if d.route != "" {
+		keys += " · fixed to " + d.route
 	}
 	if d.refreshedAt.IsZero() {
 		return "Running · " + keys + " · checking quota…"
