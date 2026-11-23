@@ -27,7 +27,8 @@ Usage:
   ferry               run the gateway in the foreground (first run asks for a key)
   ferry status        show keys, plans, quota and running state
   ferry key add       add a GLM Coding Plan key (verified, stored in the Keychain)
-  ferry key remove    remove a key by name
+		ferry key remove    remove a key by name
+  ferry route         show routing; fix it to one key or back to automatic
   ferry install       start ferry at login
   ferry uninstall     stop starting at login
 
@@ -170,6 +171,11 @@ func cmdKeyRemove(store KeyStore, args []string) error {
 	if !slices.Contains(names, args[0]) {
 		return fmt.Errorf("no key named %q (see:  ferry status)", args[0])
 	}
+	// A load error leaves the question open; removal proceeds and the
+	// startup route check fails loudly if the name really was pinned.
+	if cfg, err := LoadConfig(defaultConfigPath()); err == nil && cfg.Route == args[0] {
+		return fmt.Errorf("%q is the fixed route. Unpin first:  ferry route auto", args[0])
+	}
 	if serviceInstalled() && len(names) == 1 {
 		return fmt.Errorf("%q is the last key, and ferry starts at login. Add another key first or stop starting at login:  ferry uninstall", args[0])
 	}
@@ -179,6 +185,63 @@ func cmdKeyRemove(store KeyStore, args []string) error {
 	fmt.Printf("Removed %q.\n", args[0])
 	applyKeyChange(os.Stdout, false)
 	return nil
+}
+
+// cmdRoute shows routing, fixes it to one key, or returns to automatic.
+// auto names no key: a key literally named "auto" cannot be picked, so
+// choose such a key another name.
+func cmdRoute(cfg Config, store KeyStore, path string, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		if cfg.Route != "" {
+			fmt.Fprintf(out, "Routing is fixed to %s.\n", cfg.Route)
+		} else {
+			fmt.Fprintln(out, "Routing is automatic: keys share the traffic, each conversation stays on one key.")
+		}
+		names, err := store.Names()
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			fmt.Fprintf(out, "  ferry route %-14s fix every request to this key\n", name)
+		}
+		fmt.Fprintln(out, "  ferry route auto           share traffic across keys")
+		return nil
+	}
+	if len(args) != 1 {
+		return errors.New("usage: ferry route [NAME | auto]")
+	}
+	name := args[0]
+	if name != "auto" {
+		names, err := store.Names()
+		if err != nil {
+			return err
+		}
+		if !slices.Contains(names, name) {
+			return fmt.Errorf("no key named %q (see:  ferry status)", name)
+		}
+	}
+	if err := writeRoute(path, routeConfigValue(name)); err != nil {
+		return err
+	}
+	if name == "auto" {
+		fmt.Fprintln(out, "Routing is automatic: keys share the traffic, each conversation stays on one key.")
+	} else {
+		fmt.Fprintf(out, "Every request now uses %s.\n", name)
+	}
+	applyKeyChange(out, false)
+	if !serviceInstalled() && healthCheck(cfg.Listen) {
+		fmt.Fprintln(out, "ferry is running in another terminal; restart it to pick this up.")
+	}
+	return nil
+}
+
+// routeConfigValue maps the CLI keyword to the config field; the config
+// field is empty for automatic routing.
+func routeConfigValue(name string) string {
+	if name == "auto" {
+		return ""
+	}
+	return name
 }
 
 func cmdInstall(store KeyStore) error {
@@ -252,9 +315,10 @@ func waitServiceGone(domain, label string, timeout time.Duration) {
 	}
 }
 
-// applyKeyChange restarts an installed ferry so a key change takes effect at
-// once. suggestInstall is false on first run and after a removal: the install
-// hint would interrupt the flow the user is already in.
+// applyKeyChange restarts an installed ferry so a key or routing change
+// takes effect at once. suggestInstall is false on first run and after a
+// removal or route change: the install hint would interrupt the flow the
+// user is already in.
 func applyKeyChange(out io.Writer, suggestInstall bool) {
 	if !serviceInstalled() {
 		if suggestInstall {
@@ -264,10 +328,10 @@ func applyKeyChange(out io.Writer, suggestInstall bool) {
 	}
 	uid := strconv.Itoa(os.Getuid())
 	if err := exec.Command(launchctlBin, "kickstart", "-k", "gui/"+uid+"/"+serviceLabel).Run(); err != nil {
-		fmt.Fprintf(out, "Could not restart ferry; the new keys load at your next login (logs: %s)\n", filepath.Join(configDir(), "ferry.log"))
+		fmt.Fprintf(out, "Could not restart ferry; the change takes effect at your next login (logs: %s)\n", filepath.Join(configDir(), "ferry.log"))
 		return
 	}
-	fmt.Fprintln(out, "Restarted with the new keys.")
+	fmt.Fprintln(out, "Restarted ferry.")
 }
 
 // serviceInstalled is a var so tests can pin the answer regardless of the

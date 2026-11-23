@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -95,6 +96,84 @@ func TestCmdInstallRefusesWithoutKeys(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ferry key add") {
 		t.Errorf("error = %v, want it to point at ferry key add", err)
+	}
+}
+
+func TestCmdRoute(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	store := &fileStore{dir: dir}
+	if err := store.Add("key1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add("key2", "s2"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &bytes.Buffer{}
+
+	if err := cmdRoute(cfg, store, path, nil, out); err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	if !strings.Contains(out.String(), "automatic") {
+		t.Errorf("show = %q, want the automatic line", out.String())
+	}
+
+	out.Reset()
+	if err := cmdRoute(cfg, store, path, []string{"key2"}, out); err != nil {
+		t.Fatalf("fix key2: %v", err)
+	}
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig after fix: %v", err)
+	}
+	if loaded.Route != "key2" {
+		t.Errorf("Route = %q, want key2 written to the config file", loaded.Route)
+	}
+	if !strings.Contains(out.String(), "key2") {
+		t.Errorf("output = %q, want it to name key2", out.String())
+	}
+
+	if err := cmdRoute(cfg, store, path, []string{"gone"}, out); err == nil {
+		t.Error("unknown key name accepted, want error")
+	}
+
+	out.Reset()
+	if err := cmdRoute(cfg, store, path, []string{"auto"}, out); err != nil {
+		t.Fatalf("auto: %v", err)
+	}
+	loaded, err = LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig after auto: %v", err)
+	}
+	if loaded.Route != "" {
+		t.Errorf("Route = %q, want empty after auto", loaded.Route)
+	}
+}
+
+func TestCmdKeyRemoveRefusesTheFixedRoute(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	path := filepath.Join(dir, "ferry", "config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"route": "key2"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &fileStore{dir: dir}
+	if err := store.Add("key2", "s2"); err != nil {
+		t.Fatal(err)
+	}
+	err := cmdKeyRemove(store, []string{"key2"})
+	if err == nil {
+		t.Fatal("removing the fixed route's key accepted, want refusal")
+	}
+	if !strings.Contains(err.Error(), "ferry route auto") {
+		t.Errorf("error = %v, want it to point at ferry route auto", err)
 	}
 }
 

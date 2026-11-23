@@ -167,6 +167,42 @@ func (c Config) ModelNames() []string {
 	return names
 }
 
+// writeRoute sets route in the config file ("" clears it), keeping every
+// other field's value untouched. A missing file gains one holding only
+// route; clearing route on a missing file does nothing.
+func writeRoute(path, route string) error {
+	var doc map[string]json.RawMessage
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &doc); err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		if route == "" {
+			return nil
+		}
+		doc = map[string]json.RawMessage{}
+	} else {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	if route == "" {
+		delete(doc, "route")
+	} else {
+		b, err := json.Marshal(route)
+		if err != nil {
+			return fmt.Errorf("encode route: %w", err)
+		}
+		doc["route"] = b
+	}
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
 func configDirNamed(name string) string {
 	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
 		return filepath.Join(dir, name)

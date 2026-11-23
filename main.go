@@ -37,6 +37,12 @@ func dispatch(args []string) error {
 		return cmdStatus(cfg, NewKeyStore(configDir()), os.Stdout)
 	case "install":
 		return cmdInstall(NewKeyStore(configDir()))
+	case "route":
+		cfg, err := LoadConfig(defaultConfigPath())
+		if err != nil {
+			return err
+		}
+		return cmdRoute(cfg, NewKeyStore(configDir()), defaultConfigPath(), args[1:], os.Stdout)
 	case "uninstall":
 		return cmdUninstall()
 	case "key":

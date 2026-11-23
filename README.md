@@ -28,6 +28,7 @@ api.z.ai coding endpoints
 go build -o /usr/local/bin/ferry .
 ferry            # first run: paste your GLM Coding Plan key (input hidden), name it, then it serves
 ferry status     # keys, plans, quota, running state
+ferry route      # show routing; ferry route NAME fixes it to one key, ferry route auto unfixes
 ferry install    # start at login (logs: ~/.config/ferry/ferry.log)
 ```
 
@@ -93,7 +94,7 @@ Optional file `~/.config/ferry/config.json` — everything has a default:
 | `listen` | `127.0.0.1:8787` | Listen address; localhost only |
 | `models` | `glm-5.3`, `glm-5.3-flash`, `glm-5.2` | Alias → upstream model (merged with the defaults); unknown names pass through unchanged |
 | `retryWait` | `"5m"` (0 disables) | How long a request is held and retried when EVERY key answers 401/403/429. z.ai's request rate limit (code 1302) is a short-window throttle that clears in seconds to minutes, and agent clients kill a whole run on one 429 — holding turns a dead run into a pause. When the deadline passes the last failover response is forwarded unchanged. Accepts a Go duration string or seconds. |
-| `route` | unset (automatic) | Name of one stored key (`ferry status` lists them); every request uses that key and never rotates to another — a 401/403/429 holds and retries it per `retryWait`. A name that is not in the key store fails at startup. Unset: automatic routing — weighted round-robin, sticky conversations, failover across keys. |
+| `route` | unset (automatic) | Set with `ferry route NAME` (unfix with `ferry route auto`): every request uses that key and never rotates to another — a 401/403/429 holds and retries it per `retryWait`. A name that is not in the key store fails at startup. Unset: automatic routing — weighted round-robin, sticky conversations, failover across keys. |
 
 The one config most tools need is an alias, so a client-baked model name
 reaches a real model:
