@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,9 +24,10 @@ import (
 // rewriting and key-failover replay.
 const maxRequestBody = 512 << 20
 
-// maxLoggedErrorBody bounds how much of an upstream error body is read for
-// logging when a key is rotated.
-const maxLoggedErrorBody = 8 << 10
+// maxErrorBody bounds how much of an upstream failover response is buffered
+// to read its error code and replay it to the client; z.ai error bodies are
+// a few hundred bytes.
+const maxErrorBody = 1 << 20
 
 type upstream struct {
 	base      string // upstream base URL, e.g. https://api.z.ai/api/anthropic
@@ -241,22 +243,27 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 		sessionID = affinityID(obj, mapped)
 	}
 
-	// One pass over the keys; when every key answers with a failover status,
-	// hold the request and sweep again until RetryWait (default 5m) or
-	// success. The z.ai request rate limit (code 1302) is a short-window
-	// throttle that clears in seconds to minutes, and agent clients kill a
-	// whole run on any 429 — holding here turns a dead run into a short
-	// pause. When the deadline passes, the last failover response is
-	// forwarded unchanged.
+	// One pass over the keys; when every key answers with a failover status
+	// and at least one of them is a short-window throttle, hold the request
+	// and sweep again until RetryWait (default 5m) or success. The z.ai
+	// request rate limit (code 1302) clears in seconds to minutes, and agent
+	// clients kill a whole run on any 429 — holding here turns a dead run
+	// into a short pause. Quota exhaustion (1308, 1310) and 401/403 do not
+	// clear within the hold, so those answer at once. When the deadline
+	// passes, the last failover response is forwarded unchanged.
 	var resp *http.Response
 	keyIdx := 0
 	for attempt := 0; ; attempt++ {
-		var ok bool
-		resp, keyIdx, ok = g.sweep(w, r, u, target, body, obj, requested, mapped, sessionID, start, cfg)
+		var transient, ok bool
+		resp, keyIdx, transient, ok = g.sweep(w, r, u, target, body, obj, requested, mapped, sessionID, start, cfg)
 		if !ok {
 			return
 		}
 		if !failoverStatus(resp.StatusCode) {
+			break
+		}
+		if !transient {
+			g.log.Quiet.Printf("%s %s model=%s no key has quota left, answering %d at once", r.Method, r.URL.Path, modelLabel(requested, mapped), resp.StatusCode)
 			break
 		}
 		wait, more := g.holdDuration(attempt, resp, cfg, start)
@@ -264,6 +271,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 			break
 		}
 		g.log.Quiet.Printf("%s %s model=%s all keys rate-limited (status %d), holding request for %s", r.Method, r.URL.Path, modelLabel(requested, mapped), resp.StatusCode, wait.Round(time.Millisecond))
+		resp.Body.Close()
 		select {
 		case <-r.Context().Done():
 			g.log.Quiet.Printf("%s %s: client gave up while every key was rate-limited", r.Method, r.URL.Path)
@@ -302,8 +310,12 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 // (prompt-cache friendly on multi-account setups); rebinds happen after the
 // sweeps. cfg is the snapshot proxy read; a concurrent Reload finishes this
 // request on the old keys rather than mixing indexes from two configs.
+//
+// When every key fails over, transient reports whether any failure can clear
+// within the hold (see shortWindowLimit), and the returned response is the
+// one whose quota resets first, so the client sees when work can resume.
 // ok=false means an error response was already written to w.
-func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, target *url.URL, body []byte, obj map[string]json.RawMessage, requested, mapped string, sessionID uint64, start time.Time, cfg Config) (*http.Response, int, bool) {
+func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, target *url.URL, body []byte, obj map[string]json.RawMessage, requested, mapped string, sessionID uint64, start time.Time, cfg Config) (resp *http.Response, keyIdx int, transient, ok bool) {
 	var order []int
 	if cfg.RouteIdx >= 0 {
 		// Fixed routing: the pinned key only. A failover status holds and
@@ -324,35 +336,103 @@ func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, targ
 			}
 		}
 	}
-	var resp *http.Response
-	keyIdx := order[0]
+	// The failover response to forward if every key fails: the earliest
+	// quota reset, else the last one.
+	var held *http.Response
+	heldKey, heldReset := 0, ""
 	for i, idx := range order {
-		keyIdx = idx
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
 		if err != nil {
+			if held != nil {
+				held.Body.Close()
+			}
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("build upstream request: %v", err), u.anthropic)
-			return nil, 0, false
+			return nil, 0, false, false
 		}
 		copyForwardedHeaders(req.Header, r.Header)
-		setUpstreamAuth(req.Header, u, cfg.APIKeys[keyIdx].Secret)
+		setUpstreamAuth(req.Header, u, cfg.APIKeys[idx].Secret)
 
-		resp, err = g.client.Do(req)
+		resp, err := g.client.Do(req)
 		if err != nil {
+			if held != nil {
+				held.Body.Close()
+			}
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("could not reach z.ai: %v", err), u.anthropic)
-			g.log.Verbose.Printf("%s %s model=%s key=%s status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), cfg.APIKeys[keyIdx].Name, time.Since(start).Round(time.Millisecond), err)
-			return nil, 0, false
+			g.log.Verbose.Printf("%s %s model=%s key=%s status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), cfg.APIKeys[idx].Name, time.Since(start).Round(time.Millisecond), err)
+			return nil, 0, false, false
 		}
-		if !failoverStatus(resp.StatusCode) || i == len(order)-1 {
-			break
+		if !failoverStatus(resp.StatusCode) {
+			if held != nil {
+				held.Body.Close()
+			}
+			return resp, idx, false, true
 		}
-		reason := peekError(resp.Body)
+		errBody, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 		resp.Body.Close()
-		next := order[(i+1)%len(order)]
-		g.log.Quiet.Printf("%s %s model=%s key=%s status=%d, trying key %s: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), cfg.APIKeys[keyIdx].Name, resp.StatusCode, cfg.APIKeys[next].Name, reason)
+		if err != nil {
+			errBody = fmt.Appendf(nil, `{"error":{"message":"ferry: read upstream error body: %v"}}`, err)
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(errBody))
+		code, reset := upstreamErrorCode(errBody)
+		if shortWindowLimit(resp.StatusCode, code) {
+			transient = true
+		}
+		if held == nil || (reset != "" && (heldReset == "" || reset < heldReset)) {
+			if held != nil {
+				held.Body.Close()
+			}
+			held, heldKey, heldReset = resp, idx, reset
+		}
+		if i < len(order)-1 {
+			g.log.Quiet.Printf("%s %s model=%s key=%s status=%d, trying key %s: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), cfg.APIKeys[idx].Name, resp.StatusCode, cfg.APIKeys[order[i+1]].Name, logLine(errBody))
+		} else {
+			g.log.Quiet.Printf("%s %s model=%s key=%s status=%d: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), cfg.APIKeys[idx].Name, resp.StatusCode, logLine(errBody))
+		}
 		// The cached quota data said this key had room; refetch it.
 		g.refreshUsageAsync()
 	}
-	return resp, keyIdx, true
+	return held, heldKey, transient, true
+}
+
+// z.ai error codes for quota exhaustion, observed live (2026-11): 1308 is
+// the 5-hour pool, 1310 the weekly pool. Both reset hours to days away,
+// beyond any hold.
+const (
+	codeFiveHourQuota = "1308"
+	codeWeeklyQuota   = "1310"
+)
+
+// shortWindowLimit reports whether a failover response can clear within the
+// hold: a 429 that is not quota exhaustion (the request rate limit 1302, or
+// an unrecognised body). 401/403 never clear on their own.
+func shortWindowLimit(status int, code string) bool {
+	return status == http.StatusTooManyRequests && code != codeFiveHourQuota && code != codeWeeklyQuota
+}
+
+// resetAtPattern matches the reset time z.ai writes into quota errors:
+// "Your limit will reset at 2026-11-23 19:10:27". The fixed-width form
+// compares correctly as a string.
+var resetAtPattern = regexp.MustCompile(`reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})`)
+
+// upstreamErrorCode reads error.code from either z.ai error shape
+// ({"error":{"code":...}} for OpenAI, {"type":"error","error":{"code":...}}
+// for Anthropic) and the reset time from its message. A body that is not
+// that shape yields empty strings: it is still forwarded as is.
+func upstreamErrorCode(body []byte) (code, reset string) {
+	var parsed struct {
+		Error struct {
+			Code    json.RawMessage `json:"code"`
+			Message string          `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &parsed) != nil {
+		return "", ""
+	}
+	code = strings.Trim(string(parsed.Error.Code), `"`)
+	if m := resetAtPattern.FindStringSubmatch(parsed.Error.Message); m != nil {
+		reset = m[1]
+	}
+	return code, reset
 }
 
 // Retry hold: exponential backoff from retryBaseWait capped at
@@ -497,11 +577,8 @@ func failoverStatus(code int) bool {
 	return code == http.StatusUnauthorized || code == http.StatusForbidden || code == http.StatusTooManyRequests
 }
 
-func peekError(r io.Reader) string {
-	b, err := io.ReadAll(io.LimitReader(r, maxLoggedErrorBody))
-	if err != nil {
-		return fmt.Sprintf("(unreadable: %v)", err)
-	}
+// logLine flattens an upstream error body to one short log line.
+func logLine(b []byte) string {
 	s := strings.Join(strings.Fields(string(b)), " ")
 	if len(s) > 200 {
 		s = s[:200] + "..."

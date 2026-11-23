@@ -96,8 +96,8 @@ Optional file `~/.config/ferry/config.json` — everything has a default:
 | --- | --- | --- |
 | `listen` | `127.0.0.1:8787` | Listen address; localhost only |
 | `models` | `glm-5.3`, `glm-5.3-flash`, `glm-5.2` | Alias → upstream model (merged with the defaults); unknown names pass through unchanged |
-| `retryWait` | `"5m"` (0 disables) | How long a request is held and retried when EVERY key answers 401/403/429. z.ai's request rate limit (code 1302) is a short-window throttle that clears in seconds to minutes, and agent clients kill a whole run on one 429 — holding turns a dead run into a pause. When the deadline passes the last failover response is forwarded unchanged. Accepts a Go duration string or seconds. |
-| `route` | unset (automatic) | Set with `ferry route NAME` (unfix with `ferry route auto`): every request uses that key and never rotates to another — a 401/403/429 holds and retries it per `retryWait`. A name that is not in the key store fails at startup. Unset: automatic routing — weighted round-robin, sticky conversations, failover across keys. |
+| `retryWait` | `"5m"` (0 disables) | How long a request is held and retried when EVERY key answers 401/403/429 and at least one 429 is a short-window throttle. z.ai's request rate limit (code 1302) clears in seconds to minutes, and agent clients kill a whole run on one 429 — holding turns a dead run into a pause. An empty 5-hour or weekly pool on every key (1308, 1310) is not held: the 429 of the key that refills first goes back at once. When the deadline passes the last failover response is forwarded unchanged. Accepts a Go duration string or seconds. |
+| `route` | unset (automatic) | Set with `ferry route NAME` (unfix with `ferry route auto`): every request uses that key and never rotates to another — a short-window 429 holds and retries it per `retryWait`. A name that is not in the key store fails at startup. Unset: automatic routing — weighted round-robin, sticky conversations, failover across keys. |
 
 The one config most tools need is an alias, so a client-baked model name
 reaches a real model:
@@ -144,5 +144,9 @@ Keys live in the Keychain, never in this file; a config that still carries
   (1310), the other tripping the short-window request limit (1302) under
   parallel agent load — a retry seconds later succeeds, so ferry waits
   instead of handing the 429 to a client that would abort its whole run.
+  The hold needs one short-window 429 in the sweep. Live incident
+  (2026-11-23): both keys' 5-hour pools empty (1308), reset 2h away — every
+  request was held 5m for nothing, so quota exhaustion now answers at once
+  with the earliest reset.
 - Gateway-generated errors use the shape of the protocol on that route
   (Anthropic `type: "error"` on `/v1/messages`, OpenAI `error` elsewhere).

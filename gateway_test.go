@@ -572,3 +572,93 @@ func TestApplyModelAlias(t *testing.T) {
 		t.Errorf("missing model: requested = %q, mapped = %q, out = %s, want passthrough", requested, mapped, out)
 	}
 }
+
+// quotaBody is a z.ai 5-hour quota error in the Anthropic shape, as logged
+// live on 2026-11-23.
+func quotaBody(reset string) string {
+	return `{"type":"error","error":{"type":"rate_limit_error","code":"1308","message":"[1308][Usage limit reached for 5 hour. Your limit will reset at ` + reset + `][20261123164705448118f4ee28402b]"}}`
+}
+
+func TestProxyQuotaExhaustedAnswersAtOnceWithEarliestReset(t *testing.T) {
+	// Both keys' 5-hour pools are empty: holding cannot help, so the client
+	// gets the 429 at once, carrying the reset of the key that refills first.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		if r.Header.Get("Authorization") == "Bearer k1" {
+			w.Write([]byte(quotaBody("2026-11-23 19:10:27")))
+			return
+		}
+		w.Write([]byte(quotaBody("2026-11-23 19:09:01")))
+	}))
+	defer upstream.Close()
+
+	srv, _ := newTestGateway(t, func(c *Config) {
+		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
+		c.RetryWait = Duration(3 * time.Second)
+	})
+
+	began := time.Now()
+	resp := postJSON(t, srv.URL+"/v1/messages", nil, `{"model":"glm-5.3"}`)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 (body: %s)", resp.StatusCode, body)
+	}
+	if elapsed := time.Since(began); elapsed > time.Second {
+		t.Errorf("client waited %s, want the 429 at once", elapsed.Round(time.Millisecond))
+	}
+	if !bytes.Contains(body, []byte("19:09:01")) {
+		t.Errorf("body = %s, want the earliest reset (19:09:01)", body)
+	}
+}
+
+func TestProxyHoldsWhenOneKeyIsOnlyThrottled(t *testing.T) {
+	// k1's 5-hour pool is empty but k2 is only throttled (1302) and recovers:
+	// the hold still applies, since one key can clear within it.
+	var k2Calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") == "Bearer k1" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(quotaBody("2026-11-23 19:10:27")))
+			return
+		}
+		if k2Calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"code":"1302","message":"Rate limit reached for requests"}}`))
+			return
+		}
+		w.Write([]byte(`{"id":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	srv, _ := newTestGateway(t, func(c *Config) {
+		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
+		c.RetryWait = Duration(3 * time.Second)
+	})
+
+	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 after the held retry (body: %s)", resp.StatusCode, body)
+	}
+}
+
+func TestUpstreamErrorCode(t *testing.T) {
+	for _, tc := range []struct{ body, code, reset string }{
+		{quotaBody("2026-11-23 19:10:27"), "1308", "2026-11-23 19:10:27"},
+		{`{"error":{"code":"1308","message":"Usage limit reached for 5 hour. Your limit will reset at 2026-11-23 19:10:27"}}`, "1308", "2026-11-23 19:10:27"},
+		{`{"error":{"code":1302,"message":"Rate limit reached for requests"}}`, "1302", ""},
+		{`not json`, "", ""},
+	} {
+		code, reset := upstreamErrorCode([]byte(tc.body))
+		if code != tc.code || reset != tc.reset {
+			t.Errorf("upstreamErrorCode(%s) = %q, %q; want %q, %q", tc.body, code, reset, tc.code, tc.reset)
+		}
+	}
+}

@@ -21,9 +21,8 @@ const (
 
 	// defaultRetryWait: the z.ai request rate limit observed on live Max
 	// plans (code 1302, 2026-11) clears within seconds to minutes; a held
-	// request that outlives it beats a failed agent run. Requests whose
-	// every key is weekly-exhausted hold for this long too, then still get
-	// the honest 429.
+	// request that outlives it beats a failed agent run. Quota exhaustion
+	// (1308, 1310) is never held; see shortWindowLimit.
 	defaultRetryWait = 5 * time.Minute
 )
 
