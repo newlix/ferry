@@ -77,13 +77,14 @@ is a placeholder the gateway ignores; localhost is the security boundary.
 | `POST /v1/chat/completions` | `https://api.z.ai/api/coding/paas/v4/chat/completions` |
 | `POST /v1/responses` | `https://api.z.ai/api/v1/responses` |
 | `POST /v1/messages` (+ `/v1/messages/count_tokens`) | `https://api.z.ai/api/anthropic/v1/messages` |
-| `GET /v1/models` | local: the models configured below |
+| `GET /v1/models` | local: `glm-5.3`, `glm-5.3-flash`, `glm-5.2` |
 | `GET /v1/quota` | local: the home page's data as JSON (per key: plan, plan end, weekly and 5-hour `left` 0..1 with `resetsAt`; `null` windows while unknown) |
 | `GET /` | local: a page with each key's weekly and 5-hour quota left, plan end date, and the base URL to use |
 | `GET /health` | local |
 
 Requests and responses pass through byte-for-byte (SSE streams included,
-flushed per chunk); only the top-level `model` field is rewritten. The coding
+flushed per chunk); the `model` field is never rewritten, so any model name
+the upstream accepts works. The coding
 endpoints are required: a coding-plan key is rejected by the general API
 endpoint `https://api.z.ai/api/paas/v4`. BigModel (bigmodel.cn) plans are not
 supported yet.
@@ -95,19 +96,11 @@ Optional file `~/.config/ferry/config.json` — everything has a default:
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `listen` | `127.0.0.1:8787` | Listen address; localhost only |
-| `models` | `glm-5.3`, `glm-5.3-flash`, `glm-5.2` | Alias → upstream model (merged with the defaults); unknown names pass through unchanged |
 | `retryWait` | `"5m"` (0 disables) | How long a request is held and retried when EVERY key answers 401/403/429 and at least one 429 is a short-window throttle. z.ai's request rate limit (code 1302) clears in seconds to minutes, and agent clients kill a whole run on one 429 — holding turns a dead run into a pause. An empty 5-hour or weekly pool on every key (1308, 1310) is not held: the 429 of the key that refills first goes back at once. When the deadline passes the last failover response is forwarded unchanged. Accepts a Go duration string or seconds. |
 | `route` | unset (automatic) | Set with `ferry route NAME` (unfix with `ferry route auto`): every request uses that key and never rotates to another — a short-window 429 holds and retries it per `retryWait`. A name that is not in the key store fails at startup. Unset: automatic routing — weighted round-robin, sticky conversations, failover across keys. |
 
-The one config most tools need is an alias, so a client-baked model name
-reaches a real model:
-
-```jsonc
-{"models": {"claude-sonnet-4-5": "glm-5.3"}}
-```
-
 Keys live in the Keychain, never in this file; a config that still carries
-`apiKeys` or `upstreams` from an older ferry fails loudly with a hint.
+`apiKeys`, `upstreams` or `models` from an older ferry fails loudly with a hint.
 
 ## Behavior notes
 
@@ -134,8 +127,8 @@ Keys live in the Keychain, never in this file; a config that still carries
   minutes. A batch client whose independent requests share one system
   prompt sends `X-Ferry-Sticky: off`: those requests go round-robin instead
   of piling onto one key's rate limit.
-- Quiet output is the product; `-v` adds one line per request (path, model
-  alias→target, key name, conversation hash, status, bytes, duration). Key
+- Quiet output is the product; `-v` adds one line per request (path, model,
+  key name, conversation hash, status, bytes, duration). Key
   rotations, quota fetch failures and held requests always print. Key
   material never appears in logs.
 - When every key answers a failover status in one sweep, the request is

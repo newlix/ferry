@@ -102,11 +102,10 @@ func postJSON(t *testing.T, url string, headers map[string]string, body string) 
 	return resp
 }
 
-func TestProxyRewritesModelAndInjectsKey(t *testing.T) {
+func TestProxyForwardsBodyUnchangedAndInjectsKey(t *testing.T) {
 	upstream, requests := runUpstream(t, http.StatusOK, `{"id":"ok"}`)
 	srv, _ := newTestGateway(t, func(c *Config) {
 		c.Upstreams = Upstreams{OpenAIChat: upstream.URL, OpenAIResponses: upstream.URL, Anthropic: upstream.URL}
-		c.Models["fast"] = "glm-5.3-flash"
 	})
 
 	in := `{"model":"fast","messages":[{"role":"user","content":"hi"}]}`
@@ -130,15 +129,8 @@ func TestProxyRewritesModelAndInjectsKey(t *testing.T) {
 	if up.apiKey != "" {
 		t.Errorf("upstream X-Api-Key = %q, want empty on OpenAI route", up.apiKey)
 	}
-	var sent map[string]any
-	if err := json.Unmarshal(up.body, &sent); err != nil {
-		t.Fatalf("upstream body %s: %v", up.body, err)
-	}
-	if sent["model"] != "glm-5.3-flash" {
-		t.Errorf("upstream model = %v, want glm-5.3-flash", sent["model"])
-	}
-	if fmt.Sprint(sent["messages"]) != `[map[content:hi role:user]]` {
-		t.Errorf("upstream messages = %v, want original messages preserved", sent["messages"])
+	if string(up.body) != in {
+		t.Errorf("upstream body = %s, want %s unchanged", up.body, in)
 	}
 }
 
@@ -534,42 +526,16 @@ func TestModelsAndHealthAndUnknownRoutes(t *testing.T) {
 	}
 }
 
-func TestApplyModelAlias(t *testing.T) {
-	aliases := map[string]string{"fast": "glm-5.3-flash"}
-
-	in := []byte(`{"model":"fast","seed":9007199254740993,"messages":[{"role":"user"}]}`)
-	requested, mapped, out := applyModelAlias(parseJSONObject(in), in, aliases)
-	if requested != "fast" || mapped != "glm-5.3-flash" {
-		t.Errorf("requested = %q, mapped = %q, want fast -> glm-5.3-flash", requested, mapped)
-	}
-	var got map[string]json.RawMessage
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatal(err)
-	}
-	if string(got["model"]) != `"glm-5.3-flash"` {
-		t.Errorf("model = %s, want \"glm-5.3-flash\"", got["model"])
-	}
-	// RawMessage passthrough keeps int64 precision that float64 round-trips lose.
-	if string(got["seed"]) != "9007199254740993" {
-		t.Errorf("seed = %s, want 9007199254740993 kept exactly", got["seed"])
-	}
-
-	in = []byte(`{"model":"unknown","x":1}`)
-	requested, mapped, out = applyModelAlias(parseJSONObject(in), in, aliases)
-	if requested != "unknown" || mapped != "unknown" || !bytes.Equal(out, in) {
-		t.Errorf("unknown model: requested = %q, mapped = %q, out = %s, want passthrough", requested, mapped, out)
-	}
-
-	in = []byte(`not json`)
-	requested, mapped, out = applyModelAlias(parseJSONObject(in), in, aliases)
-	if requested != "" || mapped != "" || !bytes.Equal(out, in) {
-		t.Errorf("non-JSON body: requested = %q, mapped = %q, out = %s, want passthrough", requested, mapped, out)
-	}
-
-	in = []byte(`{"messages":[]}`)
-	requested, mapped, out = applyModelAlias(parseJSONObject(in), in, aliases)
-	if requested != "" || mapped != "" || !bytes.Equal(out, in) {
-		t.Errorf("missing model: requested = %q, mapped = %q, out = %s, want passthrough", requested, mapped, out)
+func TestRequestModel(t *testing.T) {
+	for in, want := range map[string]string{
+		`{"model":"fast","x":1}`: "fast",
+		`{"messages":[]}`:        "",
+		`{"model":7}`:            "",
+		`not json`:               "",
+	} {
+		if got := requestModel(parseJSONObject([]byte(in))); got != want {
+			t.Errorf("requestModel(%s) = %q, want %q", in, got, want)
+		}
 	}
 }
 

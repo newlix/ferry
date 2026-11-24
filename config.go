@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 )
@@ -36,13 +35,16 @@ type Upstreams struct {
 	Usage string
 }
 
+// glmModels is what GET /v1/models and the home page list. ferry forwards
+// any model name unchanged; this list only tells clients what exists.
+var glmModels = []string{"glm-5.3", "glm-5.3-flash", "glm-5.2"}
+
 // Config is the on-disk config file plus runtime-only fields. The file holds
-// listen, models and retryWait; keys come from the key store, upstreams are
+// listen, retryWait and route; keys come from the key store, upstreams are
 // fixed. The runtime fields carry json:"-" so a legacy config spelling them
 // is an unknown field and fails loudly instead of silently loading.
 type Config struct {
-	Listen string            `json:"listen"`
-	Models map[string]string `json:"models"`
+	Listen string `json:"listen"`
 	// RetryWait caps how long a request is held and retried when every key
 	// returned a failover status (401/403/429); 0 disables holding. See the
 	// retry loop in gateway.go.
@@ -107,17 +109,11 @@ func DefaultConfig() Config {
 			Anthropic:       defaultUpstreamAnthropic,
 			Usage:           defaultUpstreamUsage,
 		},
-		Models: map[string]string{
-			"glm-5.3":       "glm-5.3",
-			"glm-5.3-flash": "glm-5.3-flash",
-			"glm-5.2":       "glm-5.2",
-		},
 	}
 }
 
 // LoadConfig reads path on top of the defaults; fields absent from the file
-// keep their defaults and the models map is merged with the defaults. A
-// missing file means defaults. Unknown fields are rejected so a pre-keychain
+// keep their defaults. A missing file means defaults. Unknown fields are rejected so a pre-keychain
 // config fails loudly instead of silently losing its keys.
 func LoadConfig(path string) (Config, error) {
 	cfg := DefaultConfig()
@@ -132,7 +128,7 @@ func LoadConfig(path string) (Config, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		if strings.Contains(err.Error(), "unknown field") {
-			return Config{}, fmt.Errorf("parse %s: %w (the file holds only \"listen\", \"models\", \"retryWait\" and \"route\"; keys now live in the key store: ferry key add)", path, err)
+			return Config{}, fmt.Errorf("parse %s: %w (the file holds only \"listen\", \"retryWait\" and \"route\"; keys now live in the key store: ferry key add)", path, err)
 		}
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
@@ -149,21 +145,7 @@ func (c Config) validate() error {
 	if c.RetryWait < 0 {
 		return errors.New("config: retryWait must not be negative (0 disables holding)")
 	}
-	for alias, target := range c.Models {
-		if alias == "" || target == "" {
-			return errors.New("config: models must map non-empty names to non-empty models")
-		}
-	}
 	return nil
-}
-
-func (c Config) ModelNames() []string {
-	names := make([]string, 0, len(c.Models))
-	for name := range c.Models {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	return names
 }
 
 // writeRoute sets route in the config file ("" clears it), keeping every

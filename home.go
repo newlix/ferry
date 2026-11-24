@@ -29,7 +29,7 @@ func (gw *Gateway) handleHome(w http.ResponseWriter, r *http.Request) {
 		known:       known,
 		refreshedAt: refreshedAt,
 		baseURL:     requestBaseURL(r) + "/v1",
-		models:      cfg.ModelNames(),
+		models:      glmModels,
 		route:       cfg.Route,
 		now:         time.Now(),
 	})

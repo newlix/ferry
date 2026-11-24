@@ -225,7 +225,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	}
 
 	obj := parseJSONObject(body)
-	requested, mapped, body := applyModelAlias(obj, body, cfg.Models)
+	model := requestModel(obj)
 
 	target, err := url.Parse(u.base + u.path)
 	if err != nil {
@@ -240,7 +240,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	// already goes to the pinned key.
 	sessionID := uint64(0)
 	if cfg.RouteIdx < 0 && len(cfg.APIKeys) > 1 && r.Header.Get(stickyHeader) != stickyOff {
-		sessionID = affinityID(obj, mapped)
+		sessionID = affinityID(obj, model)
 	}
 
 	// One pass over the keys; when every key answers with a failover status
@@ -255,7 +255,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	keyIdx := 0
 	for attempt := 0; ; attempt++ {
 		var transient, ok bool
-		resp, keyIdx, transient, ok = g.sweep(w, r, u, target, body, obj, requested, mapped, sessionID, start, cfg)
+		resp, keyIdx, transient, ok = g.sweep(w, r, u, target, body, obj, model, sessionID, start, cfg)
 		if !ok {
 			return
 		}
@@ -263,14 +263,14 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 			break
 		}
 		if !transient {
-			g.log.Quiet.Printf("%s %s model=%s no key has quota left, answering %d at once", r.Method, r.URL.Path, modelLabel(requested, mapped), resp.StatusCode)
+			g.log.Quiet.Printf("%s %s model=%s no key has quota left, answering %d at once", r.Method, r.URL.Path, modelLabel(model), resp.StatusCode)
 			break
 		}
 		wait, more := g.holdDuration(attempt, resp, cfg, start)
 		if !more {
 			break
 		}
-		g.log.Quiet.Printf("%s %s model=%s all keys rate-limited (status %d), holding request for %s", r.Method, r.URL.Path, modelLabel(requested, mapped), resp.StatusCode, wait.Round(time.Millisecond))
+		g.log.Quiet.Printf("%s %s model=%s all keys rate-limited (status %d), holding request for %s", r.Method, r.URL.Path, modelLabel(model), resp.StatusCode, wait.Round(time.Millisecond))
 		resp.Body.Close()
 		select {
 		case <-r.Context().Done():
@@ -298,7 +298,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 	if sessionID != 0 {
 		sessionLabel = fmt.Sprintf(" conv=%08x", sessionID)
 	}
-	g.log.Verbose.Printf("%s %s model=%s key=%s%s status=%d in=%dB out=%dB dur=%s", r.Method, r.URL.Path, modelLabel(requested, mapped), cfg.APIKeys[keyIdx].Name, sessionLabel, resp.StatusCode, len(body), out.n, time.Since(start).Round(time.Millisecond))
+	g.log.Verbose.Printf("%s %s model=%s key=%s%s status=%d in=%dB out=%dB dur=%s", r.Method, r.URL.Path, modelLabel(model), cfg.APIKeys[keyIdx].Name, sessionLabel, resp.StatusCode, len(body), out.n, time.Since(start).Round(time.Millisecond))
 }
 
 // sweep tries the key order once, replaying the buffered body. Key order
@@ -315,7 +315,7 @@ func (g *Gateway) proxy(w http.ResponseWriter, r *http.Request, u upstream) {
 // within the hold (see shortWindowLimit), and the returned response is the
 // one whose quota resets first, so the client sees when work can resume.
 // ok=false means an error response was already written to w.
-func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, target *url.URL, body []byte, obj map[string]json.RawMessage, requested, mapped string, sessionID uint64, start time.Time, cfg Config) (resp *http.Response, keyIdx int, transient, ok bool) {
+func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, target *url.URL, body []byte, obj map[string]json.RawMessage, model string, sessionID uint64, start time.Time, cfg Config) (resp *http.Response, keyIdx int, transient, ok bool) {
 	var order []int
 	if cfg.RouteIdx >= 0 {
 		// Fixed routing: the pinned key only. A failover status holds and
@@ -358,7 +358,7 @@ func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, targ
 				held.Body.Close()
 			}
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("could not reach z.ai: %v", err), u.anthropic)
-			g.log.Verbose.Printf("%s %s model=%s key=%s status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(requested, mapped), cfg.APIKeys[idx].Name, time.Since(start).Round(time.Millisecond), err)
+			g.log.Verbose.Printf("%s %s model=%s key=%s status=upstream-error dur=%s: %v", r.Method, r.URL.Path, modelLabel(model), cfg.APIKeys[idx].Name, time.Since(start).Round(time.Millisecond), err)
 			return nil, 0, false, false
 		}
 		if !failoverStatus(resp.StatusCode) {
@@ -384,9 +384,9 @@ func (g *Gateway) sweep(w http.ResponseWriter, r *http.Request, u upstream, targ
 			held, heldKey, heldReset = resp, idx, reset
 		}
 		if i < len(order)-1 {
-			g.log.Quiet.Printf("%s %s model=%s key=%s status=%d, trying key %s: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), cfg.APIKeys[idx].Name, resp.StatusCode, cfg.APIKeys[order[i+1]].Name, logLine(errBody))
+			g.log.Quiet.Printf("%s %s model=%s key=%s status=%d, trying key %s: %s", r.Method, r.URL.Path, modelLabel(model), cfg.APIKeys[idx].Name, resp.StatusCode, cfg.APIKeys[order[i+1]].Name, logLine(errBody))
 		} else {
-			g.log.Quiet.Printf("%s %s model=%s key=%s status=%d: %s", r.Method, r.URL.Path, modelLabel(requested, mapped), cfg.APIKeys[idx].Name, resp.StatusCode, logLine(errBody))
+			g.log.Quiet.Printf("%s %s model=%s key=%s status=%d: %s", r.Method, r.URL.Path, modelLabel(model), cfg.APIKeys[idx].Name, resp.StatusCode, logLine(errBody))
 		}
 		// The cached quota data said this key had room; refetch it.
 		g.refreshUsageAsync()
@@ -479,9 +479,8 @@ func retryAfter(resp *http.Response) time.Duration {
 }
 
 func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
-	names := g.config().ModelNames()
-	data := make([]map[string]string, 0, len(names))
-	for _, name := range names {
+	data := make([]map[string]string, 0, len(glmModels))
+	for _, name := range glmModels {
 		data = append(data, map[string]string{"id": name, "object": "model", "owned_by": "z-ai"})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
@@ -496,31 +495,14 @@ func parseJSONObject(body []byte) map[string]json.RawMessage {
 	return obj
 }
 
-// applyModelAlias maps the top-level "model" through the alias map. The body
-// is rebuilt from json.RawMessage so every other value keeps its exact bytes
-// (int64 precision, string escaping).
-func applyModelAlias(obj map[string]json.RawMessage, body []byte, aliases map[string]string) (requested, mapped string, out []byte) {
-	if obj == nil {
-		return "", "", body
+// requestModel reads the top-level "model" for logs and conversation
+// affinity. ferry never rewrites it: the body goes upstream byte-for-byte.
+func requestModel(obj map[string]json.RawMessage) string {
+	var model string
+	if raw, ok := obj["model"]; ok && json.Unmarshal(raw, &model) == nil {
+		return model
 	}
-	raw, ok := obj["model"]
-	if !ok || json.Unmarshal(raw, &requested) != nil {
-		return "", "", body
-	}
-	target, ok := aliases[requested]
-	if !ok || target == "" || target == requested {
-		return requested, requested, body
-	}
-	modelJSON, err := json.Marshal(target)
-	if err != nil {
-		return requested, requested, body
-	}
-	obj["model"] = modelJSON
-	rewritten, err := json.Marshal(obj)
-	if err != nil {
-		return requested, requested, body
-	}
-	return requested, target, rewritten
+	return ""
 }
 
 // copyForwardedHeaders copies end-to-end headers in either direction,
@@ -586,15 +568,11 @@ func logLine(b []byte) string {
 	return s
 }
 
-func modelLabel(requested, mapped string) string {
-	switch {
-	case requested == "":
+func modelLabel(model string) string {
+	if model == "" {
 		return "-"
-	case requested == mapped:
-		return requested
-	default:
-		return requested + "->" + mapped
 	}
+	return model
 }
 
 func methodNotAllowed(w http.ResponseWriter, allow string) {

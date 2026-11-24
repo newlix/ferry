@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -18,9 +17,6 @@ func TestLoadConfigMissingFileGivesDefaults(t *testing.T) {
 	}
 	if cfg.Upstreams.Usage != defaultUpstreamUsage {
 		t.Errorf("Upstreams.Usage = %q, want default %q", cfg.Upstreams.Usage, defaultUpstreamUsage)
-	}
-	if cfg.Models["glm-5.3"] != "glm-5.3" {
-		t.Errorf("Models = %v, want defaults", cfg.Models)
 	}
 	if cfg.Route != "" || cfg.RouteIdx != -1 {
 		t.Errorf("Route = %q, RouteIdx = %d, want automatic routing", cfg.Route, cfg.RouteIdx)
@@ -42,12 +38,9 @@ func TestLoadConfigRoute(t *testing.T) {
 	}
 }
 
-func TestLoadConfigOverridesAndMergesModels(t *testing.T) {
+func TestLoadConfigOverridesListen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	err := os.WriteFile(path, []byte(`{
-		"listen": "127.0.0.1:9999",
-		"models": {"fast": "glm-5.3-flash"}
-	}`), 0o600)
+	err := os.WriteFile(path, []byte(`{"listen": "127.0.0.1:9999"}`), 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,16 +51,18 @@ func TestLoadConfigOverridesAndMergesModels(t *testing.T) {
 	if cfg.Listen != "127.0.0.1:9999" {
 		t.Errorf("Listen = %q, want 127.0.0.1:9999", cfg.Listen)
 	}
-	for alias, target := range map[string]string{
-		"fast":    "glm-5.3-flash",
-		"glm-5.3": "glm-5.3",
-	} {
-		if cfg.Models[alias] != target {
-			t.Errorf("Models[%q] = %q, want %q", alias, cfg.Models[alias], target)
-		}
+}
+
+// A config from before aliases were removed must fail, not load with its
+// aliases silently ignored.
+func TestLoadConfigRejectsModels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	err := os.WriteFile(path, []byte(`{"models": {"fast": "glm-5.3-flash"}}`), 0o600)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !slices.Equal(cfg.ModelNames(), []string{"fast", "glm-5.2", "glm-5.3", "glm-5.3-flash"}) {
-		t.Errorf("ModelNames = %v", cfg.ModelNames())
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), `unknown field "models"`) {
+		t.Errorf("LoadConfig with models: err = %v, want unknown field \"models\"", err)
 	}
 }
 
