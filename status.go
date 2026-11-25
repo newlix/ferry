@@ -31,42 +31,45 @@ func cmdStatus(cfg Config, store KeyStore, out io.Writer) error {
 	if cfg.Route != "" {
 		line += " · fixed to " + cfg.Route
 	}
-	fmt.Fprintf(out, "%s\n\n", line)
+	if _, err := fmt.Fprintf(out, "%s\n\n", line); err != nil {
+		return err
+	}
 
 	names, err := store.Names()
 	if err != nil {
 		return err
 	}
 	if len(names) == 0 {
-		fmt.Fprintln(out, "No keys yet. Add one:  ferry key add")
-		return nil
+		_, err := fmt.Fprintln(out, "No keys yet. Add one:  ferry key add")
+		return err
 	}
 	m := newUsageMonitor(cfg.Upstreams.Usage, NewNullLogger())
 	for _, name := range names {
 		secret, err := store.Get(name)
 		if err != nil {
-			fmt.Fprintf(out, "  %-14s unavailable: %v\n", name, err)
+			if _, err := fmt.Fprintf(out, "  %-14s unavailable: %v\n", name, err); err != nil {
+				return err
+			}
 			continue
 		}
 		u, err := m.fetchKey(secret)
-		renderKeyStatus(out, name, u, err)
+		if _, err := fmt.Fprintln(out, keyStatusLine(name, u, err)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func renderKeyStatus(out io.Writer, name string, u keyUsage, err error) {
+func keyStatusLine(name string, u keyUsage, err error) string {
 	if err != nil {
 		var ce *consoleError
 		if errors.As(err, &ce) {
 			if ce.code == 401 || ce.code == 403 {
-				fmt.Fprintf(out, "  %-14s invalid key. Remove it:  ferry key remove %s\n", name, name)
-				return
+				return fmt.Sprintf("  %-14s invalid key. Remove it:  ferry key remove %s", name, name)
 			}
-			fmt.Fprintf(out, "  %-14s quota unknown (z.ai error: %s)\n", name, ce.msg)
-			return
+			return fmt.Sprintf("  %-14s quota unknown (z.ai error: %s)", name, ce.msg)
 		}
-		fmt.Fprintf(out, "  %-14s quota unknown (could not reach z.ai)\n", name)
-		return
+		return fmt.Sprintf("  %-14s quota unknown (could not reach z.ai)", name)
 	}
 
 	line := fmt.Sprintf("  %-14s %-8s ", name, planLabel(u))
@@ -94,7 +97,7 @@ func renderKeyStatus(out io.Writer, name string, u keyUsage, err error) {
 			line += ", refills in " + relTime(time.Until(u.sessionReset))
 		}
 	}
-	fmt.Fprintln(out, line)
+	return line
 }
 
 const sessionLowThreshold = 0.25

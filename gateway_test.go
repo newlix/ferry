@@ -214,8 +214,8 @@ func TestProxyFailsOverOnRateLimit(t *testing.T) {
 	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 200 after failover (body: %s)", resp.StatusCode, body)
+		body, err := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 after failover (body: %s, read error: %v)", resp.StatusCode, body, err)
 	}
 }
 
@@ -379,8 +379,8 @@ func TestProxyHoldsRequestUntilAKeyRecovers(t *testing.T) {
 	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 200 after the held retry (body: %s)", resp.StatusCode, body)
+		body, err := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 after the held retry (body: %s, read error: %v)", resp.StatusCode, body, err)
 	}
 	if elapsed := time.Since(began); elapsed < 2*time.Second {
 		t.Errorf("client waited %s, want the clamped hold (~3s) before the retry", elapsed.Round(time.Millisecond))
@@ -610,8 +610,8 @@ func TestProxyHoldsWhenOneKeyIsOnlyThrottled(t *testing.T) {
 	resp := postJSON(t, srv.URL+"/v1/chat/completions", nil, `{"model":"glm-5.3"}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 200 after the held retry (body: %s)", resp.StatusCode, body)
+		body, err := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 after the held retry (body: %s, read error: %v)", resp.StatusCode, body, err)
 	}
 }
 

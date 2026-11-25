@@ -62,8 +62,10 @@ type homeData struct {
 }
 
 func homePage(d homeData) g.Node {
-	var body g.Node = console.ConsoleEmpty{Size: console.ConsoleEmptySizeLarge, Icon: lucide.KeyRound,
-		Title: "No keys yet", Body: "Add one with ferry key add."}
+	var body g.Node = console.ConsoleEmpty{
+		Size: console.ConsoleEmptySizeLarge, Icon: lucide.KeyRound,
+		Title: "No keys yet", Body: "Add one with ferry key add.",
+	}
 	if len(d.keys) > 0 {
 		rows := make([]console.ConsoleTableRow, len(d.keys))
 		for i, k := range d.keys {

@@ -580,10 +580,21 @@ func methodNotAllowed(w http.ResponseWriter, allow string) {
 	writeError(w, http.StatusMethodNotAllowed, fmt.Sprintf("method not allowed, use %s", allow), false)
 }
 
+// writeJSON marshals before the status goes out, so a value that cannot be
+// encoded (a NaN quota fraction) answers 500 with the reason, not a 200 with
+// no body.
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		status = http.StatusInternalServerError
+		body, err = json.Marshal(map[string]any{"error": map[string]any{"message": "encode reply: " + err.Error()}})
+		if err != nil {
+			panic("writeJSON: a map of strings failed to marshal: " + err.Error())
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	w.Write(append(body, '\n'))
 }
 
 func writeError(w http.ResponseWriter, status int, msg string, anthropic bool) {

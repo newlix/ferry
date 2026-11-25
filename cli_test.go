@@ -24,7 +24,10 @@ func TestCmdKeyAddSavesVerifiedKey(t *testing.T) {
 	if err := cmdKeyAdd(cfg, store, in, &out, false); err != nil {
 		t.Fatalf("cmdKeyAdd: %v (output: %s)", err, out.String())
 	}
-	names, _ := store.Names()
+	names, err := store.Names()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(names) != 1 || names[0] != "pro" {
 		t.Fatalf("Names = %v, want [pro]", names)
 	}
@@ -54,8 +57,8 @@ func TestCmdKeyAddRejectsKeyZaiRefuses(t *testing.T) {
 	if !strings.Contains(err.Error(), "rejected") {
 		t.Errorf("error = %v, want a rejection message", err)
 	}
-	if names, _ := store.Names(); len(names) != 0 {
-		t.Errorf("Names = %v, want none saved", names)
+	if names, err := store.Names(); err != nil || len(names) != 0 {
+		t.Errorf("Names = %v, %v; want none saved", names, err)
 	}
 }
 
@@ -210,12 +213,12 @@ func TestResolveRoute(t *testing.T) {
 
 func TestPromptDefault(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader("myname\n"))
-	if got := promptDefault(r, &bytes.Buffer{}, "Name this key", "key1"); got != "myname" {
-		t.Errorf("promptDefault = %q, want myname", got)
+	if got, err := promptDefault(r, &bytes.Buffer{}, "Name this key", "key1"); err != nil || got != "myname" {
+		t.Errorf("promptDefault = %q, %v; want myname", got, err)
 	}
 	r = bufio.NewReader(strings.NewReader("\n"))
-	if got := promptDefault(r, &bytes.Buffer{}, "Name this key", "key1"); got != "key1" {
-		t.Errorf("promptDefault empty = %q, want default key1", got)
+	if got, err := promptDefault(r, &bytes.Buffer{}, "Name this key", "key1"); err != nil || got != "key1" {
+		t.Errorf("promptDefault empty = %q, %v; want default key1", got, err)
 	}
 }
 

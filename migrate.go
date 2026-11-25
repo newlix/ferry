@@ -3,11 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime"
 	"slices"
 	"strconv"
-	"time"
 )
 
 // One-time migration from the pre-rename glms install (the rename to ferry
@@ -85,8 +83,9 @@ func migrateLaunchd() error {
 		return nil
 	}
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	exec.Command(launchctlBin, "bootout", domain+"/"+glmsName).Run()
-	waitServiceGone(domain, glmsName, 3*time.Second)
+	if err := bootout(domain, glmsName); err != nil {
+		return err
+	}
 	if err := os.Remove(plistPathNamed(glmsName)); err != nil && !os.IsNotExist(err) {
 		return err
 	}

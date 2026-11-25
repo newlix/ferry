@@ -21,8 +21,7 @@ const (
 	launchctlBin = "/bin/launchctl"
 )
 
-func printUsage(out io.Writer) {
-	fmt.Fprint(out, `ferry — local API gateway for the GLM Coding Plan
+const usageText = `ferry — local API gateway for the GLM Coding Plan
 
 Usage:
   ferry               run the gateway in the foreground (first run asks for a key)
@@ -34,8 +33,7 @@ Usage:
   ferry uninstall     stop starting at login
 
 Run flags: -v (log every request)
-`)
-}
+`
 
 // cmdRun is the default action and the launchd entry point: it blocks serving
 // HTTP until the process is stopped.
@@ -118,7 +116,9 @@ func cmdKeyAdd(cfg Config, store KeyStore, in io.Reader, out io.Writer, suggestI
 		return err
 	}
 	reader := bufio.NewReader(in)
-	fmt.Fprintln(out, "Paste your GLM Coding Plan key (hidden while typing).")
+	if _, err := fmt.Fprintln(out, "Paste your GLM Coding Plan key (hidden while typing)."); err != nil {
+		return err
+	}
 	secret, err := readSecret(reader, terminalReader(in))
 	if err != nil {
 		return err
@@ -132,23 +132,31 @@ func cmdKeyAdd(cfg Config, store KeyStore, in io.Reader, out io.Writer, suggestI
 	var ce *consoleError
 	switch {
 	case verr == nil:
-		fmt.Fprintf(out, "Verified: %s, %.0f%% left this week (resets in %s).\n", planLabel(u), u.weeklyRem*100, relTime(time.Until(u.weeklyReset)))
+		if _, err := fmt.Fprintf(out, "Verified: %s, %.0f%% left this week (resets in %s).\n", planLabel(u), u.weeklyRem*100, relTime(time.Until(u.weeklyReset))); err != nil {
+			return err
+		}
 	case errors.As(verr, &ce) && (ce.code == 401 || ce.code == 403):
 		return fmt.Errorf("z.ai rejected this key (%s). Nothing saved", ce.msg)
 	default:
-		fmt.Fprintf(out, "Could not verify this key (%v); saving anyway.\n", verr)
+		if _, err := fmt.Fprintf(out, "Could not verify this key (%v); saving anyway.\n", verr); err != nil {
+			return err
+		}
 	}
 
-	name := promptDefault(reader, out, "Name this key", defaultKeyName(names))
+	name, err := promptDefault(reader, out, "Name this key", defaultKeyName(names))
+	if err != nil {
+		return err
+	}
 	if slices.Contains(names, name) {
 		return fmt.Errorf("a key named %q already exists (remove it first: ferry key remove %s)", name, name)
 	}
 	if err := store.Add(name, secret); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "Added %q.\n", name)
-	applyKeyChange(cfg, out, suggestInstall)
-	return nil
+	// The key is saved: a failed write of this line must not skip telling
+	// the running ferry about it.
+	_, werr := fmt.Fprintf(out, "Added %q.\n", name)
+	return errors.Join(werr, applyKeyChange(cfg, out, suggestInstall))
 }
 
 // defaultKeyName picks the first unused keyN so accepting the default can
@@ -189,8 +197,7 @@ func cmdKeyRemove(store KeyStore, args []string) error {
 	if loadErr != nil {
 		cfg = Config{Listen: defaultListen}
 	}
-	applyKeyChange(cfg, os.Stdout, false)
-	return nil
+	return applyKeyChange(cfg, os.Stdout, false)
 }
 
 // cmdRoute shows routing, fixes it to one key, or returns to automatic.
@@ -198,20 +205,24 @@ func cmdKeyRemove(store KeyStore, args []string) error {
 // choose such a key another name.
 func cmdRoute(cfg Config, store KeyStore, path string, args []string, out io.Writer) error {
 	if len(args) == 0 {
+		header := "Routing is automatic: keys share the traffic, each conversation stays on one key."
 		if cfg.Route != "" {
-			fmt.Fprintf(out, "Routing is fixed to %s.\n", cfg.Route)
-		} else {
-			fmt.Fprintln(out, "Routing is automatic: keys share the traffic, each conversation stays on one key.")
+			header = fmt.Sprintf("Routing is fixed to %s.", cfg.Route)
+		}
+		if _, err := fmt.Fprintln(out, header); err != nil {
+			return err
 		}
 		names, err := store.Names()
 		if err != nil {
 			return err
 		}
+		var choices strings.Builder
 		for _, name := range names {
-			fmt.Fprintf(out, "  ferry route %-14s fix every request to this key\n", name)
+			fmt.Fprintf(&choices, "  ferry route %-14s fix every request to this key\n", name)
 		}
-		fmt.Fprintln(out, "  ferry route auto           share traffic across keys")
-		return nil
+		choices.WriteString("  ferry route auto           share traffic across keys\n")
+		_, err = io.WriteString(out, choices.String())
+		return err
 	}
 	if len(args) != 1 {
 		return errors.New("usage: ferry route [NAME | auto]")
@@ -229,13 +240,14 @@ func cmdRoute(cfg Config, store KeyStore, path string, args []string, out io.Wri
 	if err := writeRoute(path, routeConfigValue(name)); err != nil {
 		return err
 	}
+	done := fmt.Sprintf("Every request now uses %s.", name)
 	if name == "auto" {
-		fmt.Fprintln(out, "Routing is automatic: keys share the traffic, each conversation stays on one key.")
-	} else {
-		fmt.Fprintf(out, "Every request now uses %s.\n", name)
+		done = "Routing is automatic: keys share the traffic, each conversation stays on one key."
 	}
-	applyKeyChange(cfg, out, false)
-	return nil
+	// The route is written: a failed write of this line must not skip
+	// telling the running ferry about it.
+	_, werr := fmt.Fprintln(out, done)
+	return errors.Join(werr, applyKeyChange(cfg, out, false))
 }
 
 // routeConfigValue maps the CLI keyword to the config field; the config
@@ -277,8 +289,9 @@ func cmdInstall(store KeyStore) error {
 	}
 	uid := strconv.Itoa(os.Getuid())
 	domain := "gui/" + uid
-	exec.Command(launchctlBin, "bootout", domain+"/"+serviceLabel).Run()
-	waitServiceGone(domain, serviceLabel, 3*time.Second)
+	if err := bootout(domain, serviceLabel); err != nil {
+		return err
+	}
 	if out, err := exec.Command(launchctlBin, "bootstrap", domain, plist).CombinedOutput(); err != nil {
 		return fmt.Errorf("could not start ferry at login: %v: %s", err, out)
 	}
@@ -297,7 +310,9 @@ func cmdInstall(store KeyStore) error {
 
 func cmdUninstall() error {
 	uid := strconv.Itoa(os.Getuid())
-	exec.Command(launchctlBin, "bootout", "gui/"+uid+"/"+serviceLabel).Run()
+	if err := bootout("gui/"+uid, serviceLabel); err != nil {
+		return err
+	}
 	if err := os.Remove(plistPath()); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -305,17 +320,33 @@ func cmdUninstall() error {
 	return nil
 }
 
-// waitServiceGone blocks until launchd no longer knows the service: bootout
-// is asynchronous, and bootstrapping while the old instance is still tearing
-// down fails with "Input/output error".
-func waitServiceGone(domain, label string, timeout time.Duration) {
+// bootout stops the service if launchd has it loaded. launchctl bootout
+// fails when the service is not loaded, the usual case on a first install, so
+// its exit status is not the answer: the service still being known after the
+// wait is, and only then is its failure returned.
+func bootout(domain, label string) error {
+	out, err := exec.Command(launchctlBin, "bootout", domain+"/"+label).CombinedOutput()
+	if waitServiceGone(domain, label, 3*time.Second) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("launchctl bootout %s/%s: %w: %s", domain, label, err, out)
+	}
+	return fmt.Errorf("launchctl bootout %s/%s: still loaded after 3s", domain, label)
+}
+
+// waitServiceGone reports whether launchd stopped knowing the service within
+// timeout: bootout is asynchronous, and bootstrapping while the old instance
+// is still tearing down fails with "Input/output error".
+func waitServiceGone(domain, label string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := exec.Command(launchctlBin, "print", domain+"/"+label).Run(); err != nil {
-			return
+			return true
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	return false
 }
 
 // applyKeyChange makes a key or routing change reach the running ferry:
@@ -323,38 +354,42 @@ func waitServiceGone(domain, label string, timeout time.Duration) {
 // which re-reads config and keys (see serve's reload handler). suggestInstall
 // is false on first run and after a removal or route change: the install
 // hint would interrupt the flow the user is already in.
-func applyKeyChange(cfg Config, out io.Writer, suggestInstall bool) {
+func applyKeyChange(cfg Config, out io.Writer, suggestInstall bool) error {
 	if serviceInstalled() {
 		uid := strconv.Itoa(os.Getuid())
 		if err := exec.Command(launchctlBin, "kickstart", "-k", "gui/"+uid+"/"+serviceLabel).Run(); err != nil {
-			fmt.Fprintf(out, "Could not restart ferry; the change takes effect at your next login (logs: %s)\n", filepath.Join(configDir(), "ferry.log"))
-			return
+			_, werr := fmt.Fprintf(out, "Could not restart ferry; the change takes effect at your next login (logs: %s)\n", filepath.Join(configDir(), "ferry.log"))
+			return werr
 		}
-		fmt.Fprintln(out, "Restarted ferry.")
-		return
+		_, err := fmt.Fprintln(out, "Restarted ferry.")
+		return err
 	}
+	var werr error
 	if suggestInstall {
-		fmt.Fprintln(out, "Not set to start at login. Set it with:  ferry install")
+		// A failed hint must not skip the reload below.
+		_, werr = fmt.Fprintln(out, "Not set to start at login. Set it with:  ferry install")
 	}
-	reloadRunning(cfg, out)
+	return errors.Join(werr, reloadRunning(cfg, out))
 }
 
 // reloadRunning signals the ferry recorded in the pidfile. A missing or
 // stale pidfile — an older ferry, or one running elsewhere — keeps the
 // restart hint.
-func reloadRunning(cfg Config, out io.Writer) {
+func reloadRunning(cfg Config, out io.Writer) error {
 	pid, ok := runningFerryPid()
 	if !ok {
 		if healthCheck(cfg.Listen) {
-			fmt.Fprintln(out, "ferry is running in another terminal; restart it to pick this up.")
+			_, err := fmt.Fprintln(out, "ferry is running in another terminal; restart it to pick this up.")
+			return err
 		}
-		return
+		return nil
 	}
 	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
-		fmt.Fprintln(out, "Could not signal the running ferry; restart it to pick this up.")
-		return
+		_, werr := fmt.Fprintln(out, "Could not signal the running ferry; restart it to pick this up.")
+		return werr
 	}
-	fmt.Fprintf(out, "Signaled ferry (pid %d) to reload config and keys.\n", pid)
+	_, err := fmt.Fprintf(out, "Signaled ferry (pid %d) to reload config and keys.\n", pid)
+	return err
 }
 
 // runningFerryPid returns the pidfile pid when it still names a ferry
@@ -438,16 +473,18 @@ func terminalReader(in io.Reader) *os.File {
 	return f
 }
 
-func promptDefault(r *bufio.Reader, out io.Writer, label, def string) string {
-	fmt.Fprintf(out, "%s [%s]: ", label, def)
+func promptDefault(r *bufio.Reader, out io.Writer, label, def string) (string, error) {
+	if _, err := fmt.Fprintf(out, "%s [%s]: ", label, def); err != nil {
+		return "", err
+	}
 	line, err := r.ReadString('\n')
 	if err != nil && line == "" {
-		return def
+		return def, nil
 	}
 	if s := strings.TrimSpace(line); s != "" {
-		return s
+		return s, nil
 	}
-	return def
+	return def, nil
 }
 
 // readSecret hides the typed key when hiddenFrom is a terminal: bash read -s

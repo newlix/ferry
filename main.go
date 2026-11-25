@@ -60,7 +60,7 @@ func dispatch(args []string) error {
 		}
 		return errors.New("usage: ferry key add | ferry key remove NAME")
 	default:
-		printUsage(os.Stdout)
+		fmt.Print(usageText)
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }

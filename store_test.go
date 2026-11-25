@@ -43,7 +43,10 @@ func TestFileStoreRoundTrip(t *testing.T) {
 	if err := s.Remove("pro"); err == nil {
 		t.Error("double Remove succeeded, want error")
 	}
-	names, _ = s.Names()
+	names, err = s.Names()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !slices.Equal(names, []string{"lite"}) {
 		t.Errorf("Names after remove = %v, want [lite]", names)
 	}

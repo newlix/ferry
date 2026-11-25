@@ -1,0 +1,12 @@
+// Cleanup calls, excluded by the user's choice (2026-11-25): errcheck cannot tell a read's Close from a write's, and every write
+// in ferry is an os.WriteFile, which returns its Close's error; the unchecked ones are response bodies read, a test's pipe and
+// listener, and the pidfile's removal at shutdown.
+(*os.File).Close
+(io.Closer).Close
+(net.Listener).Close
+os.Remove
+// a reply's body after its status is sent: a failed write is the client gone, and nobody is left to tell (writeJSON and the
+// tests' stub upstreams)
+(net/http.ResponseWriter).Write
+fmt.Fprint(net/http.ResponseWriter)
+fmt.Fprintf(net/http.ResponseWriter)

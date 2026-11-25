@@ -4,6 +4,8 @@ github.com/at-least/ciderui v0.0.0-20261113200616-a303daa314b4 h1:2kxuLi6U7xhV2S
 github.com/at-least/ciderui v0.0.0-20261113200616-a303daa314b4/go.mod h1:63CCc3nUdimqae3Sgh33Y+zvuehcuEOvtmR7qiUsUCI=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+github.com/kisielk/errcheck v1.30.0 h1:ZIxNDAfAd4larXHTceoZP/dYPAB90dHg1OYhA2sVh5k=
+github.com/kisielk/errcheck v1.30.0/go.mod h1:uiCAInmFuyOje4VDdbQSP9mgqf5gORYSXrDf19XilsI=
 golang.org/x/exp/typeparams v0.0.0-20231108232855-2478ac86f678 h1:1P7xPZEwZMoBoz0Yze5Nx2/4pxj6nw9ZqHWXqP0iRgQ=
 golang.org/x/exp/typeparams v0.0.0-20231108232855-2478ac86f678/go.mod h1:AbB0pIl9nAr9wVwH+Z2ZpaocVmF5I4GyWCDIsVjR0bk=
 golang.org/x/mod v0.41.0 h1:qJmnOUb4YB+FsEuM3HcWucdZASCPGhsX6uljO6pog0c=
@@ -18,3 +20,5 @@ honnef.co/go/tools v0.8.2 h1:+jPbCzuYxYrcoOvCecYUFDj+XJQRmzIhJmlbpps21Zk=
 honnef.co/go/tools v0.8.2/go.mod h1:xG1Q4n+mg3bKZrO6RWFA9jFlkqplflmDRHGeuexiLDs=
 maragu.dev/gomponents v1.4.0 h1:Z8H37xDr+ZYv0GiBsrOFdHYjoTGsospoIG+QLOGazwI=
 maragu.dev/gomponents v1.4.0/go.mod h1:oEDahza2gZoXDoDHhw8jBNgH+3UR5ni7Ur648HORydM=
+mvdan.cc/gofumpt v0.12.0 h1:1Lbudkz2kpM9Cjz2pL4M19u7q+GaEhCTNf7N9mfpcho=
+mvdan.cc/gofumpt v0.12.0/go.mod h1:SmBHHrljiZu/uoypeKup3rFzP6eoC9UwCp2iH5E3jZA=

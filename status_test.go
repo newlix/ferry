@@ -9,15 +9,15 @@ import (
 
 func TestRenderKeyStatus(t *testing.T) {
 	render := func(u keyUsage) string {
-		var out bytes.Buffer
-		renderKeyStatus(&out, "pro", u, nil)
-		return out.String()
+		return keyStatusLine("pro", u, nil)
 	}
 
 	// The 30-minute margins keep the rounded countdowns stable while the
 	// test runs.
-	healthy := keyUsage{planName: "GLM Coding Max", weeklyRem: 0.8, sessionRem: 0.9,
-		weeklyReset: time.Now().Add(60*time.Hour + 30*time.Minute), sessionReset: time.Now().Add(3*time.Hour + 30*time.Minute)}
+	healthy := keyUsage{
+		planName: "GLM Coding Max", weeklyRem: 0.8, sessionRem: 0.9,
+		weeklyReset: time.Now().Add(60*time.Hour + 30*time.Minute), sessionReset: time.Now().Add(3*time.Hour + 30*time.Minute),
+	}
 	got := render(healthy)
 	for _, want := range []string{"Max", "80% this week", "· resets in 2d 12h"} {
 		if !strings.Contains(got, want) {
@@ -61,10 +61,8 @@ func TestRenderKeyStatus(t *testing.T) {
 		t.Errorf("unknown plan not labeled: %s", render(unknownPlan))
 	}
 
-	var out bytes.Buffer
-	renderKeyStatus(&out, "pro", keyUsage{}, errString("boom"))
-	if !strings.Contains(out.String(), "quota unknown (could not reach z.ai)") {
-		t.Errorf("error render = %s", out.String())
+	if got := keyStatusLine("pro", keyUsage{}, errString("boom")); !strings.Contains(got, "quota unknown (could not reach z.ai)") {
+		t.Errorf("error render = %s", got)
 	}
 }
 

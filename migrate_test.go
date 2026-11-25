@@ -85,7 +85,10 @@ func TestCopyKeysCompletesPartialCopy(t *testing.T) {
 	if secret, err := dst.Get("pro"); err != nil || secret != "sk-pro" {
 		t.Errorf("dst.Get(pro) = %q, %v; want untouched sk-pro", secret, err)
 	}
-	names, _ := dst.Names()
+	names, err := dst.Names()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !slices.Equal(names, []string{"lite", "pro"}) {
 		t.Errorf("dst.Names = %v, want [lite pro]", names)
 	}
@@ -97,7 +100,7 @@ func TestCopyKeysNoopOnEmptySrc(t *testing.T) {
 	if err := copyKeys(src, dst); err != nil {
 		t.Fatalf("copyKeys: %v", err)
 	}
-	if names, _ := dst.Names(); len(names) != 0 {
-		t.Errorf("dst.Names = %v, want none", names)
+	if names, err := dst.Names(); err != nil || len(names) != 0 {
+		t.Errorf("dst.Names = %v, %v; want none", names, err)
 	}
 }
